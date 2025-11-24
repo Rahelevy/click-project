@@ -6,8 +6,11 @@ from .sub_agents.a_intent_agent.agent import intent_agent
 from .sub_agents.b_focus_agent.agent import focus_agent
 from .sub_agents.c_executor_agent.agent import executor_agent
 from .sub_agents.d_explanation_agent.agent import explainer_agent
-
-
+from main_agent.sub_agents.a_intent_agent.schemas import UserQuestion
+from pydantic import BaseModel
+# ⭐ NEW: Output schema required so ADK treats this as a root agent.
+class RootOutput(BaseModel):
+    message: str | None = None
 root_agent = Agent(
     name="root_manager",
     model="gemini-2.0-flash",
@@ -29,7 +32,9 @@ root_agent = Agent(
        Your only job is routing the conversation to the correct agent.
 
     """,
-
+    input_schema=UserQuestion,
+    output_schema=RootOutput,
+    output_key="result",
     # The only agent that should receive initial free-text questions
     sub_agents=[
         intent_agent,     # Agent A

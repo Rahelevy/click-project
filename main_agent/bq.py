@@ -65,6 +65,7 @@ if __name__ == "__main__":
     select * from `practicode-2025.clicks_data_prac.encoded_clicks`
     where app_id='app_id_5'
     and date(event_time)= '2025-10-24'
+    limit 10
     """
     df = bq_client.execute_query(
         qu, "test_query"
