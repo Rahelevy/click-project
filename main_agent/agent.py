@@ -2,10 +2,10 @@ from google.adk.agents import Agent
 from google.adk.tools.agent_tool import AgentTool
 
 # Import sub-agents
-from sub_agents.a_intent_agent import intent_agent
-from sub_agents.b_focus_agent import focus_agent
-from sub_agents.c_executor_agent import sql_executor_agent
-from sub_agents.d_explanation_agent import explainer_agent
+from .sub_agents.a_intent_agent.agent import intent_agent
+from .sub_agents.b_focus_agent.agent import focus_agent
+from .sub_agents.c_executor_agent.agent import executor_agent
+from .sub_agents.d_explanation_agent.agent import explainer_agent
 
 
 root_agent = Agent(
@@ -34,7 +34,7 @@ root_agent = Agent(
     sub_agents=[
         intent_agent,     # Agent A
         focus_agent,      # Used via A, not directly from the user
-        sql_executor_agent,
+        executor_agent,   # Agent C
         explainer_agent,
     ],
 
