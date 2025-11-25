@@ -12,13 +12,22 @@ class FocusOutput(BaseModel):
 focus_agent = Agent(
     name="b_focus_agent",
     model="gemini-2.0-flash",
-    description="Focus Agent that asks for clarification when A sends needs_focus.",
-    instruction="""
-        You are Agent B (Focus Agent). Your job:
+    description="Focus Agent that asks clarification when A needs focus.",
 
-        - Receive the invalid question details from Agent A.
-        - Ask the user ONE clarification question.
-        - Produce a refined, clearer question.
+    instruction="""
+        You are Agent B (Focus Agent).
+
+        RETURN STRICT JSON:
+        {
+          "refined_question": "<new clearer question>"
+        }
+
+        ONLY ask for ONE clarification.
+        NEVER talk about "types of clicks" or invent categories.
+
+        If Agent A says the question is vague:
+          - Reformulate the question into a more precise version.
+          - Add the missing detail mentioned in reason.
     """,
 
     input_schema=FocusInput,

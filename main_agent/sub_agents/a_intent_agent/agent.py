@@ -1,51 +1,45 @@
 from google.adk.agents import Agent
-from .schemas import UserQuestion, AgentAOutput
-from .sql_builder import convert_question_to_sql
 from google.adk.tools.agent_tool import AgentTool
+from .schemas import UserQuestion, AgentAOutput
 
+# Import the exit loop tool
+from main_agent.sub_agents.a_intent_agent.tools import exit_loop
 
 intent_agent = Agent(
     name="a_intent_agent",
     model="gemini-2.0-flash",
-    description="Intent Analyzer – validates free-text questions and generates SQL.",
+    description="Intent Analyzer – validates user questions and generates SQL.",
+    
     instruction="""
-           You are Agent A – the Language-to-SQL Converter.
+You are Agent A – the Intent Analyzer.
 
-Your responsibilities:
+Your tasks:
 1. Understand the user's free-text question.
-2. Determine whether the question is valid:
+2. Determine if it is VALID according to these rules:
 
-   VALID questions must satisfy:
-   - The question must be understandable and not vague or context-dependent.
-   - It must include at least one filtering dimension such as:
-     app_id, media_source, partner, site_id, engagement_type, hour, date, or any other valid filter.
-     (A date is optional.)
-   - If the question requests an aggregation (COUNT / SUM / AVG / MIN / MAX)
-     it must include at least one filter. 
-     Aggregations without filters must be sent to Agent 2.
-   - It must not be too broad (“all data”, “everything”, “show everything”).
-   - It must not contain multiple unrelated requests.
-   - It must not include dangerous operations (DELETE, UPDATE, DROP, INSERT, CREATE).
-   - It must not include invalid or future dates.
+VALID QUESTION RULES:
+- Must be understandable and not vague.
+- Must include at least one FILTER (app_id, media_source, partner, site_id, engagement_type, hour, date, etc.)
+- DATE IS OPTIONAL.
+- If user asks for aggregation (COUNT / SUM / AVG...) → must include at least one filter.
+- Must NOT ask for “type of clicks” or invent new filters.
+- Must NOT contain forbidden operations (DELETE, UPDATE…)
+- Must NOT be overly broad (“all data”, etc.)
 
-3. If the question does NOT satisfy these conditions:
-   - Do NOT reject it.
-   - Return:
-       { "valid": false, "needs_focus": true, "reason": "<short explanation>" }
-   - This will forward the request to Agent 2 for clarification.
+IF VALID:
+- Generate a SAFE SQL query on table:
+    `practicode-2025.clicks_data_prac.encoded_clicks`
+- Return:
+    { "valid": true, "needs_focus": false, "sql": "<SQL>" }
+- THEN CALL the tool exit_loop() to stop the refinement loop.
 
-4. If the question IS valid:
-   - Generate a SAFE SQL query using the table:
-       `practicode-2025.clicks_data_prac.encoded_clicks`
-   - Apply COUNT/SUM/AVG/GROUP BY only if implied.
-   - Return:
-       { "valid": true, "needs_focus": false, "sql": "<generated SQL>" }
+IF INVALID:
+- Return:
+    { "valid": false, "needs_focus": true, "reason": "<short reason>" }
+""",
 
-5. Never execute SQL.
-6. Never explain SQL.
-7. Only validate and generate SQL.
+    input_schema=UserQuestion,
+    output_schema=AgentAOutput,
 
-                """,
+    tools=[exit_loop],   # <--- REQUIRED to stop the loop
 )
-
-intent_tool = AgentTool(intent_agent)

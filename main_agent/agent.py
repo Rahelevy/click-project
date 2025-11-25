@@ -1,50 +1,27 @@
-from google.adk.agents import Agent
-from google.adk.tools.agent_tool import AgentTool
+from google.adk.agents import SequentialAgent, LoopAgent
 
-# Import sub-agents
 from .sub_agents.a_intent_agent.agent import intent_agent
 from .sub_agents.b_focus_agent.agent import focus_agent
 from .sub_agents.c_executor_agent.agent import executor_agent
 from .sub_agents.d_explanation_agent.agent import explainer_agent
-from main_agent.sub_agents.a_intent_agent.schemas import UserQuestion
-from pydantic import BaseModel
-# ⭐ NEW: Output schema required so ADK treats this as a root agent.
-class RootOutput(BaseModel):
-    message: str | None = None
-root_agent = Agent(
-    name="root_manager",
-    model="gemini-2.0-flash",
-    description="Root manager agent responsible for routing user queries.",
-    
-    instruction="""
-    You are the ROOT MANAGER agent.
 
-    ROUTING RULES:
-
-    1. If the user question matches a predefined FAQ:
-        → Immediately send the corresponding SQL query directly to Agent 3 (SQL Executor).
-        → Do NOT validate or refine FAQ questions.
-
-    2. If the question is a free-text user question:
-        → Always delegate it to Agent A (Intent Analyzer) for validation and SQL creation.
-
-    3. You must NEVER produce SQL or explanations yourself.
-       Your only job is routing the conversation to the correct agent.
-
-    """,
-    input_schema=UserQuestion,
-    output_schema=RootOutput,
-    output_key="result",
-    # The only agent that should receive initial free-text questions
+# LOOP A <-> B
+refinement_loop = LoopAgent(
+    name="refinement_loop",
+    max_iterations=5,
     sub_agents=[
-        intent_agent,     # Agent A
-        focus_agent,      # Used via A, not directly from the user
-        executor_agent,   # Agent C
-        explainer_agent,
+        intent_agent,   # FIRST → checks validity
+        focus_agent,    # SECOND → only called if A returns needs_focus=true
     ],
+    description="Loop between Agent A and B until the question becomes valid."
+)
 
-    # tools=[
-    #     AgentTool(faq_sql_tool),   # FAQs → predefined SQL
-    #     AgentTool(run_sql_tool),   # BigQuery SQL executor
-    # ],
+root_agent = SequentialAgent(
+    name="main_agent",
+    description="Full pipeline",
+    sub_agents=[
+        refinement_loop,   # Step 1: Loop until valid
+        executor_agent,    # Step 2: execute SQL
+        explainer_agent,   # Step 3: explain results
+    ],
 )
