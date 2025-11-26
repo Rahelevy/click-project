@@ -8,7 +8,7 @@ from .sub_agents.d_explanation_agent.agent import explainer_agent
 # LOOP A <-> B
 refinement_loop = LoopAgent(
     name="refinement_loop",
-    max_iterations=5,
+    max_iterations=1,
     sub_agents=[
         intent_agent,   # FIRST → checks validity
         focus_agent,    # SECOND → only called if A returns needs_focus=true
