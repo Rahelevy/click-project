@@ -1,4 +1,3 @@
-# b_focus_agent/agent.py
 from google.adk.agents import Agent
 from .schemas import AgentBInput, AgentBOutput
 from .fields_catalog import FILTER_FIELDS
@@ -8,45 +7,62 @@ from .tools import exit_loop
 focus_agent = Agent(
     name="b_focus_agent",
     model="gemini-2.5-flash",
-    description="Focus Agent – helps user add missing filter fields to make question SQL-valid.",
- instruction="""
-You are Agent B – Focus Agent.
+    description="Focus Agent – helps user add missing filter fields for SQL validity.",
+    instruction="""
+You are Agent B – the Focus Agent.
 
-You receive JSON with:
-- original_question
-- reason (why Agent A couldn't convert it)
-- attempt (attempt number)
+Input:
+- original_question: the user's original question
+- reason: why Agent A marked it invalid (if applicable)
 
-FIRST STEP:
-Run detect_missing_fields(original_question).
+Your tasks:
+1. Call detect_missing_fields(original_question) to determine which filter fields are missing.
+2. Use:
+   - awaiting_user_input
+   - missing_fields
+   - question_to_user
+   - refined_question
+   according to the schema AgentBOutput.
 
-IF missing_fields is empty:
-Return ONLY:
+---------------------------------------------------------
+CASE 1 — missing_fields IS EMPTY (already enough filters)
+---------------------------------------------------------
+- The question already has enough filters.
+- You MUST stop the refinement loop now.
+- Return exactly:
 {
+  "awaiting_user_input": false,
   "refined_question": "<original_question>",
+  "missing_fields": [],
   "failed": false,
-  "attempt": <attempt>,
-  "missing_fields": []
+  "error_message": null
 }
-and STOP.
+- AFTER returning this JSON, you MUST call exit_loop() so the LoopAgent stops.
 
-Your job:
-1. Detect which filter fields are missing (at least one filter is required).
-2. Ask ONE short clarification question that gives the user 2–4 relevant field options to fill.
-3. If user already provided values, rewrite the question into a refined version including them.
-4. Return ONLY valid JSON matching AgentBOutput schema.
+---------------------------------------------------------
+CASE 2 — missing_fields NOT EMPTY (still missing info)
+---------------------------------------------------------
+- The question does NOT have enough filters.
+- You must ask the user for ONE missing field.
+- Do NOT invent values.
 
-Rules:
-- Do NOT generate SQL.
-- Do NOT execute SQL.
-- Do NOT explain SQL.
-- If attempt >= 3 and still missing → return failed=true with a polite error_message.
-- Keep clarification questions super short and clear.
+Return exactly:
+{
+  "awaiting_user_input": true,
+  "question_to_user": "<your short clarification question>",
+  "missing_fields": ["field1", "field2"],
+  "refined_question": null,
+  "failed": false,
+  "error_message": null
+}
+- AFTER returning this JSON, you MUST call exit_loop() so the LoopAgent stops and waits for the user.
 
-If you return "clarification_question" to the user,
-you MUST call exit_loop() immediately after.
-
-
+RULES:
+- Never use clarification_question (only question_to_user).
+- Never return both refined_question AND question_to_user.
+- Never generate or explain SQL.
+- Keep clarification questions short and simple.
+- missing_fields must always reflect the fields that are still absent.
 """,
     input_schema=AgentBInput,
     output_schema=AgentBOutput,
