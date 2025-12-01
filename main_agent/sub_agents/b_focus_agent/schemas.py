@@ -43,6 +43,6 @@ class AgentBOutput(BaseModel):
     # Missing fields needed
     missing_fields: List[str] = Field(default_factory=list)
 
-    # Error management
+    # Error management 
     failed: bool = False
     error_message: Optional[str] = None

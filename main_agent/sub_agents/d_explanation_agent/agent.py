@@ -1,7 +1,7 @@
-from google.adk.agents import LlmAgent
+from google.adk.agents import Agent
 
 EXPLANATION_SYSTEM_PROMPT = """
-You are the EXPLANATION AGENT in a 4-agent system.
+You are the EXPLANATION AGENT that helps users understand database query results.
 
 Your role:
 - You receive: (1) the original user question, (2) the raw result returned from the database.
@@ -19,9 +19,9 @@ Formatting rules:
 7. Answer in the same language as the user.
 """
 
-explanation_agent = LlmAgent(
+explainer_agent = Agent(
     name="d_explanation_agent",
-    model="gemini-2.0-flash",   # עובד עם API KEY שלך מה-ENV
+    model="gemini-2.5-flash",   # עובד עם API KEY שלך מה-ENV
     instruction=EXPLANATION_SYSTEM_PROMPT,
     description="Explains DB query results in a friendly human-readable form.",
 )

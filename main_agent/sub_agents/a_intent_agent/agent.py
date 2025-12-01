@@ -21,7 +21,6 @@ VALID FILTER EXAMPLES:
 app_id, media_source, partner, site_id, engagement_type,
 campaign_id, country, platform, device, hour, event_time, date, date range.
 
-DATE is optional unless the question is too vague without it.
 Forbidden operations: DELETE, DROP, UPDATE, INSERT, etc.
 
 ---------------------------------------
@@ -61,7 +60,6 @@ If the question contains at least ONE valid filter:
 }
 
 RULES:
-- Never return needs_focus.
 - Never invent filter values.
 - Never refine the user question.
 - Always update context and always match AgentAOutput exactly.

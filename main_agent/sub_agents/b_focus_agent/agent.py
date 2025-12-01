@@ -1,8 +1,10 @@
 from google.adk.agents import Agent
 from .schemas import AgentBInput, AgentBOutput
-from .fields_catalog import FILTER_FIELDS
-from .focus_utils import detect_missing_fields
 from .tools import exit_loop
+
+
+# לכתוב לו שיחזיר הודעת שגיאה אם משהו משתבש 
+
 
 focus_agent = Agent(
     name="b_focus_agent",
@@ -10,10 +12,6 @@ focus_agent = Agent(
     description="Focus Agent – helps user add missing filter fields for SQL validity.",
     instruction="""
 You are Agent B – the Focus Agent.
-
-Input:
-- original_question: the user's original question
-- reason: why Agent A marked it invalid (if applicable)
 
 Your tasks:
 1. Call detect_missing_fields(original_question) to determine which filter fields are missing.
@@ -32,7 +30,7 @@ CASE 1 — missing_fields IS EMPTY (already enough filters)
 - Return exactly:
 {
   "awaiting_user_input": false,
-  "refined_question": "<original_question>",
+  "refined_question": "<refined_question>",
   "missing_fields": [],
   "failed": false,
   "error_message": null
