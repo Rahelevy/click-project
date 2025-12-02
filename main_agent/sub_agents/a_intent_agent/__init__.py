@@ -1,1 +1,1 @@
-from .agent import intent_agent
+from .agent import IntentAgent
