@@ -1,16 +1,15 @@
-import asyncio
-from main_agent.agent import root_agent
+from main_agent.sub_agents.a_intent_agent.agent import IntentAgent
+from main_agent.sub_agents.a_intent_agent.schemas import AgentAOutput
 
-async def test_root():
-    print("\n=== TEST ROOT AGENT (simple) ===\n")
+agent_a = IntentAgent()
 
-    # La méthode OFFICIELLE ADK 1.19
-    result = await root_agent.run_with_user_prompt(
-        "count events for app app_id_20"
-    )
+# 2. Prepare a test state (just like ADK would)
+state = AgentAOutput(
+    question="show me all the clicks for app id 20 on october 2025"
+)
 
-    print("\n=== RESULT ===")
-    print(result)
+# 3. Run it directly
+result = agent_a.run(state)
 
-if __name__ == "__main__":
-    asyncio.run(test_root())
+print(result)
+print(result["state"])
