@@ -1,4 +1,10 @@
-from google.adk.agents import Agent
+from google.adk.agents import BaseAgent
+from google import genai
+import json
+import os
+
+from .schemas import ExplanationInput, ExplanationOutput
+
 
 EXPLANATION_SYSTEM_PROMPT = """
 You are AGENT D — the final layer before answering the end user.
@@ -51,7 +57,7 @@ TABLE HANDLING RULES:
     | value1   | value2   |
     | value1   | value2   |
 
-- If the user language is Hebrew:
+- If the user is Hebrew:
     - Translate column titles to Hebrew.
     - Keep numbers aligned.
     - Example:
@@ -63,16 +69,70 @@ TABLE HANDLING RULES:
 5. Never invent details.
 6. Never output SQL.
 7. The description MUST be easy, human, warm, and user-friendly.
-8. If incoming.description contains tabular data (list of rows), generate a clean Markdown table.  
-   - First row = column headers  
-   - Following rows = data  
-   - Do NOT add explanations inside the table, only below or above it.
-
+8. If incoming.description contains tabular data (list of rows), generate a clean Markdown table.
 """
 
-explainer_agent = Agent(
-    name="d_explanation_agent",
-    model="gemini-2.5-flash",
-    instruction=EXPLANATION_SYSTEM_PROMPT,
-    description="Transforms executor technical description into a friendly answer."
-)
+
+class ExplainerAgent(BaseAgent):
+
+    def __init__(self):
+        super().__init__(name="explainer_agent")
+
+        api_key = os.getenv("GOOGLE_API_KEY")
+        if not api_key:
+            raise ValueError("Missing GOOGLE_API_KEY environment variable.")
+
+        # Gemini client (google-genai 1.52.0)
+        object.__setattr__(self, "client", genai.Client(api_key=api_key))
+
+    def run(self, state: ExplanationInput):
+
+        # Build instruction + input
+        prompt = f"""
+{EXPLANATION_SYSTEM_PROMPT}
+
+--------------------
+USER QUESTION:
+--------------------
+{state.user_question}
+
+--------------------
+EXECUTOR RESULT:
+--------------------
+{state.incoming.model_dump_json()}
+"""
+
+        # Call Gemini
+        response = self.client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt
+        )
+
+        # Extract text
+        content = response.text.strip()
+
+        # Strip code fences if the LLM returns ```json ... ```
+        if content.startswith("```"):
+            content = content.split("\n", 1)[1]
+            if content.endswith("```"):
+                content = content.rsplit("```", 1)[0].strip()
+
+        # Parse JSON
+        try:
+            parsed = json.loads(content)
+        except Exception:
+            raise ValueError(f"Agent D returned invalid JSON:\n{content}")
+
+        # Build ExplanationOutput state
+        output = ExplanationOutput(
+            status=parsed.get("status", state.incoming.status),
+            description=parsed.get("description", "")
+        )
+
+        # Return updated state to RootAgent
+        return {
+            "state": output,
+            "should_run_focus": False,
+            "should_run_executor": False,
+            "should_run_explainer": False,  # last agent
+        }
