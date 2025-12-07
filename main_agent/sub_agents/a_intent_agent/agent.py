@@ -2,6 +2,7 @@ from google.adk.agents import BaseAgent
 from google import genai
 import json
 import os
+import re
 
 from .schemas import AgentAOutput
 
@@ -10,14 +11,129 @@ class IntentAgent(BaseAgent):
 
     def __init__(self):
         super().__init__(name="intent_agent")
-
         api_key = os.getenv("GOOGLE_API_KEY")
         if not api_key:
             raise ValueError("Missing GOOGLE_API_KEY environment variable.")
-
         object.__setattr__(self, "client", genai.Client(api_key=api_key))
 
+    # ----------------- SMALL HELPERS (OPTION C) -----------------
+
+    @staticmethod
+    def _is_hebrew(text: str) -> bool:
+        return any("א" <= ch <= "ת" for ch in (text or ""))
+
+    @staticmethod
+    def _has_filter_hint(text: str) -> bool:
+        """בדיקה האם יש רמז לפילטר בשאלה."""
+        if not text:
+            return False
+
+        t = text.lower()
+
+        # טריגרים כלליים
+        hints = [
+            "app id", "appid", "app_id", "app ",
+            "media source", "media_source", "source ",
+            "partner", "agency",
+            "site id", "site_id", "publisher",
+            "date", "day", "hour", "time",
+            "retargeting", "re-engaged", "installed before",
+            "click", "view"
+        ]
+
+        # טריגרים בעברית
+        heb_hints = [
+            "אפליקציה", "מקור פרסום", "מקור התנועה", "שותף",
+            "פאבלישר", "אתר", "תאריך", "יום", "שעה", "ריטרגטינג",
+            "התקינו בעבר", "משתמשים חוזרים"
+        ]
+
+        # דפוסי מספרים (media source 257)
+        numeric_patterns = [
+            r"media\s*source\s*\d+",
+            r"site\s*id\s*\d+",
+            r"partner\s*\d+",
+            r"app\s*id\s*\d+",
+        ]
+        for p in numeric_patterns:
+            if re.search(p, t):
+                return True
+
+        return any(h in t for h in hints) or any(h in text for h in heb_hints)
+
+    @staticmethod
+    def _looks_too_broad(text: str) -> bool:
+        """
+        טריגר פשוט לזיהוי שאלות רחבות מדי כמו:
+        - "תן לי את כל הדאטה"
+        - "give me all the data"
+        - "show me everything"
+        """
+        if not text:
+            return True
+
+        t = text.lower().strip()
+
+        broad_patterns = [
+            r"\ball the data\b",
+            r"\ball data\b",
+            r"\beverything\b",
+        ]
+        heb_broad = [
+            "כל הדאטה",
+            "כל המידע",
+            "תן לי הכל",
+            "תני לי הכל",
+        ]
+
+        if any(p in t for p in heb_broad):
+            return True
+
+        if any(re.search(p, t) for p in broad_patterns):
+            return True
+
+        # אם אין שום רמז לפילטר – גם זה "רחב מדי"
+        if not IntentAgent._has_filter_hint(text):
+            return True
+
+        return False
+
+    # ---------------------- MAIN RUN ---------------------------
+
     def run(self, state: AgentAOutput):
+
+        user_question = state.question or ""
+
+        # 1) FIRST LAYER – SIMPLE TOO-BROAD CHECK (OPTION C)
+        if self._looks_too_broad(user_question):
+            is_hebrew = self._is_hebrew(user_question)
+
+            if is_hebrew:
+                question_to_user = (
+                    "השאלה מעט רחבה. אפשר לחדד או למקד – למשל לפי אפליקציה, "
+                    "מקור תנועה, תאריך או סוג פעולה?"
+                )
+            else:
+                question_to_user = (
+                    "This request is a bit too broad. Could you narrow it down – "
+                    "for example by app, traffic source, date, or event type?"
+                )
+
+            state.valid = False
+            state.awaiting_user_input = True
+            state.missing_fields = ["filter_needed"]
+            state.question_to_user = question_to_user
+            state.sql = None
+            state.reason = "too_broad"
+
+            return {
+                "state": state,
+                "should_run_focus": True,
+                "should_run_executor": False,
+                "should_run_explainer": False,
+            }
+
+        # 2) IF NOT TOO BROAD → LET THE MODEL DO THE HEAVY LIFTING
 
         # ================= PROMPT ====================
         prompt = f"""
@@ -113,13 +229,13 @@ SQL GENERATION RULES
 1. ALWAYS use:
    `practicode-2025.clicks_data_prac.encoded_clicks`
 
-2. NEVER return all columns.
+2. NEVER return all columns by default.
    Allowed:
    - SELECT SUM(total_events)
    - SELECT aggregated data
 
 3. DO NOT generate SELECT event_time, hr, ...
-   unless user explicitly requests “all fields”.
+   unless user explicitly requests “all fields” or a non-aggregated list.
 
 4. Date ranges MUST follow:
    event_time >= '<start> 00:00:00 UTC'
@@ -135,6 +251,7 @@ The dataset uses synthetic app IDs in the form "app_id_<number>"
 
 1) If the user provides an app id as a plain number, such as:
    - "app id = 2"
+   - "app id 2"
    - "app_id 3"
    - "app 10"
    - "appid=5"
@@ -145,6 +262,7 @@ The dataset uses synthetic app IDs in the form "app_id_<number>"
 
    Example:
    "app id = 2" → app_id = "app_id_2"
+   "app id 5"   → app_id = "app_id_5"
 
 2) If the user provides an app id that is not numeric and does NOT start with "app_id_",
    such as "test.app", "com.app.test", or any other package-like string:
@@ -159,7 +277,7 @@ The dataset uses synthetic app IDs in the form "app_id_<number>"
    - sql = null
    - question_to_user = a friendly clarification message in the user's language
 
-   ------------------------------------------------------------
+------------------------------------------------------------
 AGGREGATION RULES — CRITICAL
 ------------------------------------------------------------
 You must NOT use SUM(), COUNT(), or any aggregation function
@@ -194,11 +312,12 @@ media_source, partner, app_id, site_id,
 engagement_type, total_events
 
 For example:
-SELECT event_time, hr, is_engaged_view, is_retargeting,
-       media_source, partner, app_id, site_id,
-       engagement_type, total_events
+SELECT
+  event_time, hr, is_engaged_view, is_retargeting,
+  media_source, partner, app_id, site_id,
+  engagement_type, total_events
 
-   ------------------------------------------------------------
+------------------------------------------------------------
 MEDIA SOURCE MAPPING RULES
 ------------------------------------------------------------
 The dataset uses media sources in the format: media_source_<number>
@@ -254,25 +373,8 @@ Examples:
    You MUST convert it to the correct SQL value:
        partner = "partner_<number>"
 
-   Example:
-   "partner 136" → partner = "partner_136"
-
 2) If the user describes the partner in natural language (English or Hebrew),
    you MUST understand it refers to the partner field.
-
-   English trigger phrases:
-   - "the partner"
-   - "the advertising partner"
-   - "the agency"
-   - "the intermediary"
-   - "the partner who delivered the traffic"
-
-   Hebrew trigger phrases:
-   - "השותף"
-   - "השותפה"
-   - "הסוכנות"
-   - "המתווך"
-   - "מי שהביא את התנועה"
 
 3) If the user provides a non-numeric partner (e.g. "partner google")
    which does NOT match the required format partner_<number>,
@@ -301,22 +403,8 @@ Examples:
    You MUST convert it to:
        site_id = "site_id_<number>"
 
-2) If the user describes the publisher/site in natural language:
-
-   English:
-   - "site where the ad was shown"
-   - "publisher"
-   - "ad publisher"
-   - "placement site"
-   - "where the ad appeared"
-
-   Hebrew:
-   - "האתר שבו הוצגה המודעה"
-   - "הפאבלישר"
-   - "המקום שבו הוצגה המודעה"
-   - "האתר של הפרסום"
-
-   You MUST understand this refers to the site_id field.
+2) If the user describes the publisher/site in natural language (English or Hebrew),
+   you MUST understand this refers to the site_id field.
 
 3) If the user does not provide a number (e.g., "show me clicks by publisher"),
    the query is NOT valid.
@@ -342,7 +430,7 @@ Therefore:
    You MUST use:
        SUM(total_events)
 
-2) If the user asks “how many rows”, “how many entries”, “כמה שורות”, etc. →
+2) If the user asks “how many rows”, “how many entries”, “כמה שורות”, etc. → 
    You MUST use:
        COUNT(*)
 
@@ -355,15 +443,15 @@ WHEN TO ASK FOR CLARIFICATION
 
 CASE A – TOO BROAD  
 Hebrew:
-"הבקשה רחבה מדי. אפשר לציין לפחות פרט אחד כמו תאריך, אפליקציה או מקור מודעה?"
+"השאלה מעט רחבה. אפשר לחדד או למקד – למשל לפי אפליקציה, מקור תנועה, תאריך או סוג פעולה?"
 English:
-"This request is a bit too broad. Could you give at least one detail such as a date, an app, or a traffic source?"
+"This request is a bit too broad. Could you narrow it down – for example by app, traffic source, date, or event type?"
 
 CASE B – UNSUPPORTED FIELD  
 Hebrew:
-"נראה שהתייחסת למידע שאין לנו עליו נתונים. אפשר לציין תאריך, אפליקציה או מקור מודעה?"
+"נראה שהתייחסת למידע שאין לנו עליו נתונים. אפשר לציין אפליקציה, מקור תנועה או טווח תאריכים?"
 English:
-"It seems you mentioned information we do not have data for. Could you specify something like an app, a date, or a traffic source?"
+"It seems you mentioned information we do not have data for. Could you specify something like an app, a traffic source, or a date range?"
 
 CASE C – AMBIGUOUS  
 Hebrew:
@@ -377,7 +465,9 @@ CASE D – INVALID DATE (non-reversed)
 ------------------------------------------------------------
 CASE E – VALID QUERY
 ------------------------------------------------------------
-Return:
+If the query is valid and enough information exists,
+you MUST return JSON ONLY in this shape:
+
 {{
  "valid": true,
  "awaiting_user_input": false,
@@ -385,13 +475,25 @@ Return:
  "question_to_user": null,
  "sql": "<generated SQL>",
  "reason": null,
- "question": "{state.question}"
+ "question": "{user_question}"
+}}
+
+If the query is NOT valid, you MUST return:
+
+{{
+ "valid": false,
+ "awaiting_user_input": true,
+ "missing_fields": ["<short_reason_code>"],
+ "question_to_user": "<friendly explanation in the same language>",
+ "sql": null,
+ "reason": "<machine_reason_or_null>",
+ "question": "{user_question}"
 }}
 
 ------------------------------------------------------------
 USER QUESTION:
 ------------------------------------------------------------
-{state.question}
+{user_question}
 """
 
         # =============== MODEL CALL ==========================
@@ -415,7 +517,7 @@ USER QUESTION:
         except Exception:
             # Fallback logic: detect Hebrew user input
             user_q = state.question or ""
-            is_hebrew = any("א" <= ch <= "ת" for ch in user_q)
+            is_hebrew = self._is_hebrew(user_q)
 
             if is_hebrew:
                 question_to_user = (
@@ -435,7 +537,7 @@ USER QUESTION:
                 "missing_fields": ["clarification_needed"],
                 "question_to_user": question_to_user,
                 "sql": None,
-                "question": state.question
+                "question": state.question,
             }
 
         # ============ UPDATE STATE ===========================

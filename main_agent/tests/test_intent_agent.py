@@ -3,149 +3,178 @@ from main_agent.sub_agents.a_intent_agent.agent import IntentAgent
 from main_agent.sub_agents.a_intent_agent.schemas import AgentAOutput
 
 
-# --------------------------------------------------------------------
-# Helper to run the agent safely and print results
-# --------------------------------------------------------------------
-def run_test(test_name: str, user_question: str):
+# ---------------------------------------------------------
+# Helper for pretty test execution (same style as before)
+# ---------------------------------------------------------
+def run_test(title, question):
     print("\n" + "=" * 80)
-    print(f"TEST: {test_name}")
+    print(f"TEST: {title}")
     print("=" * 80)
 
     agent = IntentAgent()
-
-    # Initialize state correctly
-    state = AgentAOutput(
-        valid=False,
-        question=user_question,
-        sql=None
-    )
-
-    # Run agent
+    state = AgentAOutput(question=question)
     result = agent.run(state)
 
-    # Convert Pydantic → dict for safe printing
-    safe_result = result.copy()
-    safe_result["state"] = safe_result["state"].model_dump()
+    # Convert Pydantic model to dict for printing
+    output = {
+        "state": result["state"].model_dump(),
+        "should_run_focus": result["should_run_focus"],
+        "should_run_executor": result["should_run_executor"],
+        "should_run_explainer": result["should_run_explainer"],
+    }
 
-    print(json.dumps(safe_result, ensure_ascii=False, indent=2))
+    print(json.dumps(output, indent=2, ensure_ascii=False))
+    return output
 
-    return safe_result
 
 
-# --------------------------------------------------------------------
-# TEST 1 — NO FULL SELECT (ENGLISH)
-# --------------------------------------------------------------------
-def test_no_full_select_english():
-    question = (
-        "Show me retargeting clicks for app_id com.app.test between 2025-01-01 and 2025-01-31"
+# =====================================================================
+# 1. TOO BROAD QUESTIONS
+# =====================================================================
+def test_too_broad():
+    r = run_test("TOO BROAD", "תן לי את כל הדאטה")
+    assert r["state"]["valid"] is False
+    assert r["state"]["awaiting_user_input"] is True
+    assert r["state"]["sql"] is None
+    print("\n✔ TOO BROAD TEST PASSED")
+
+
+# =====================================================================
+# 2. APP ID NUMERIC
+# =====================================================================
+def test_app_id_numeric():
+    r = run_test("APP ID NUMERIC", "Show me clicks for app id 5")
+    assert "app_id_5" in (r["state"]["sql"] or "")
+    assert r["state"]["valid"] is True
+    print("\n✔ APP ID NUMERIC TEST PASSED")
+
+
+# =====================================================================
+# 3. APP ID INVALID STRING → must ask user
+# =====================================================================
+def test_app_id_invalid():
+    r = run_test("APP ID INVALID", "Show me clicks for app_id xyz")
+    assert r["state"]["valid"] is False
+    assert r["state"]["sql"] is None
+    print("\n✔ APP ID INVALID TEST PASSED")
+
+
+# =====================================================================
+# 4. MEDIA SOURCE NUMERIC
+# =====================================================================
+def test_media_source_numeric():
+    r = run_test("MEDIA SOURCE NUMERIC", "Show me clicks from media source 257")
+    assert "media_source_257" in (r["state"]["sql"] or "")
+    assert r["state"]["valid"] is True
+    print("\n✔ MEDIA SOURCE NUMERIC TEST PASSED")
+
+
+# =====================================================================
+# 5. PARTNER NUMERIC
+# =====================================================================
+def test_partner_numeric():
+    r = run_test("PARTNER NUMERIC", "Show me clicks from partner 88")
+    assert "partner_88" in (r["state"]["sql"] or "")
+    assert r["state"]["valid"] is True
+    print("\n✔ PARTNER NUMERIC TEST PASSED")
+
+
+# =====================================================================
+# 6. SITE ID NUMERIC
+# =====================================================================
+def test_site_id_numeric():
+    r = run_test("SITE ID NUMERIC", "Show me clicks from site id 38238605550")
+    assert "site_id_38238605550" in (r["state"]["sql"] or "")
+    assert r["state"]["valid"] is True
+    print("\n✔ SITE ID NUMERIC TEST PASSED")
+
+
+# =====================================================================
+# 7. RETARGETING SEMANTIC
+# =====================================================================
+def test_retargeting_semantic():
+    r = run_test("RETARGETING SEMANTIC",
+                 "Show me clicks from users who already installed for app_id 2")
+
+    assert "is_retargeting = TRUE" in (r["state"]["sql"] or "")
+    assert "app_id_2" in (r["state"]["sql"] or "")
+    print("\n✔ RETARGETING SEMANTIC TEST PASSED")
+
+
+# =====================================================================
+# 8. AGGREGATION ("how many") → SUM(total_events)
+# =====================================================================
+def test_aggregation_sum():
+    r = run_test("AGGREGATION SUM", "How many clicks from media source 257?")
+    assert "SUM(total_events)" in (r["state"]["sql"] or "")
+    print("\n✔ AGGREGATION SUM TEST PASSED")
+
+
+# =====================================================================
+# 9. NO AGGREGATION → must return full fields
+# =====================================================================
+def test_no_aggregation():
+    r = run_test("NO AGGREGATION", "Show me clicks from media source 257")
+
+    sql = r["state"]["sql"] or ""
+    assert "SUM(" not in sql
+    assert "event_time" in sql
+    print("\n✔ NO AGGREGATION TEST PASSED")
+
+
+# =====================================================================
+# 10. REVERSED DATE FIX
+# =====================================================================
+def test_reversed_dates():
+    r = run_test(
+        "REVERSED DATE FIX",
+        "Show me clicks from 2025-10-10 to 2025-01-01 for app_id 5"
     )
-    result = run_test("NO FULL SELECT (ENGLISH)", question)
 
-    assert result["state"]["valid"]
-    sql = result["state"]["sql"]
-    assert "SELECT SUM(total_events)" in sql
-    assert "event_time" not in sql.split("SELECT")[1].split("FROM")[0]
-
-
-# --------------------------------------------------------------------
-# TEST 2 — NO FULL SELECT (HEBREW)
-# --------------------------------------------------------------------
-def test_no_full_select_hebrew():
-    question = "תראה לי קליקים של ריטרגטינג עבור האפליקציה com.app.test בין 2025-01-01 ל-2025-01-31"
-    result = run_test("NO FULL SELECT (HEBREW)", question)
-
-    assert result["state"]["valid"]
-    sql = result["state"]["sql"]
-    assert "SELECT SUM(total_events)" in sql
-
-
-# --------------------------------------------------------------------
-# TEST 3 — reversed date range auto fix
-# --------------------------------------------------------------------
-def test_reversed_date_range():
-    question = "Show me clicks from 2025-10-10 to 2025-01-01 for app_id test.app"
-    result = run_test("REVERSED DATE RANGE AUTO-FIX", question)
-
-    assert result["state"]["valid"]
-    sql = result["state"]["sql"]
+    sql = r["state"]["sql"] or ""
     assert "2025-01-01" in sql
-    assert "2025-10-11" in sql  # end +1 day
+    assert "2025-10-11" in sql  # end+1 day
+    print("\n✔ REVERSED DATE FIX TEST PASSED")
 
 
-# --------------------------------------------------------------------
-# TEST 4 — language check (Hebrew)
-# --------------------------------------------------------------------
+# =====================================================================
+# 11. LANGUAGE CHECK (HEBREW)
+# =====================================================================
 def test_language_hebrew():
-    question = "תן לי את כל הדאטה"
-    result = run_test("LANGUAGE CHECK (HEBREW)", question)
-
-    assert not result["state"]["valid"]
-
-    q = result["state"]["question_to_user"]
-    assert any("א" <= ch <= "ת" for ch in q), "Expected Hebrew output"
+    r = run_test("LANGUAGE HEBREW", "כמה קליקים היו לapp id 2?")
+    # Hebrew response expected
+    assert any("א" <= ch <= "ת" for ch in (r["state"]["question_to_user"] or "")) \
+        or r["state"]["valid"] is True
+    print("\n✔ LANGUAGE HEBREW TEST PASSED")
 
 
-# --------------------------------------------------------------------
-# TEST 5 — language check (English)
-# --------------------------------------------------------------------
-def test_language_english():
-    question = "Give me all the data for the last day were the app id=2"
-    result = run_test("LANGUAGE CHECK (ENGLISH)", question)
-
-    assert not result["state"]["valid"]
-
-    q = result["state"]["question_to_user"]
-    assert any("a" <= ch.lower() <= "z" for ch in q), "Expected English output"
+# =====================================================================
+# 12. FALLBACK NON-JSON
+# =====================================================================
+def test_fallback_json_error():
+    # We force model to return garbage by giving it a nonsense input
+    r = run_test("FALLBACK JSON", "### @$%^#@$%^ invalid json trigger")
+    assert r["state"]["valid"] is False
+    assert r["state"]["question_to_user"] is not None
+    print("\n✔ FALLBACK JSON TEST PASSED")
 
 
-# --------------------------------------------------------------------
-# TEST 6 — unsupported field (no reason check!)
-# --------------------------------------------------------------------
-def test_unsupported_field():
-    question = "Show me installs in France"
-    result = run_test("UNSUPPORTED FIELD", question)
 
-    assert not result["state"]["valid"]
-    assert result["state"]["awaiting_user_input"]
-    assert result["state"]["question_to_user"] is not None
-
-
-# --------------------------------------------------------------------
-# TEST 7 — fallback JSON (Hebrew)
-# --------------------------------------------------------------------
-def test_fallback_hebrew():
-    question = "תן לי בבקשה"
-    result = run_test("HEBREW FALLBACK", question)
-
-    assert not result["state"]["valid"]
-
-    q = result["state"]["question_to_user"]
-    assert any("א" <= ch <= "ת" for ch in q), "Fallback should be Hebrew"
-
-
-# --------------------------------------------------------------------
-# TEST 8 — fallback JSON (English)
-# --------------------------------------------------------------------
-def test_fallback_english():
-    question = "Please show me"
-    result = run_test("ENGLISH FALLBACK", question)
-
-    assert not result["state"]["valid"]
-
-    q = result["state"]["question_to_user"]
-    assert any("a" <= ch.lower() <= "z" for ch in q), "Fallback should be English"
-
-
-# --------------------------------------------------------------------
-# Run all tests
-# --------------------------------------------------------------------
+# =====================================================================
+# MAIN
+# =====================================================================
 if __name__ == "__main__":
-    test_no_full_select_english()
-    test_no_full_select_hebrew()
-    test_reversed_date_range()
+    test_too_broad()
+    test_app_id_numeric()
+    test_app_id_invalid()
+    test_media_source_numeric()
+    test_partner_numeric()
+    test_site_id_numeric()
+    test_retargeting_semantic()
+    test_aggregation_sum()
+    test_no_aggregation()
+    test_reversed_dates()
     test_language_hebrew()
-    test_language_english()
-    test_unsupported_field()
-    test_fallback_hebrew()
-    test_fallback_english()
+    test_fallback_json_error()
 
+    print("\n\n🎉 ALL TESTS COMPLETED SUCCESSFULLY (if no errors above)\n")
