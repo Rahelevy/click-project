@@ -89,7 +89,7 @@ def test_language_hebrew():
 # TEST 5 — language check (English)
 # --------------------------------------------------------------------
 def test_language_english():
-    question = "Give me all the data"
+    question = "Give me all the data for the last day were the app id=2"
     result = run_test("LANGUAGE CHECK (ENGLISH)", question)
 
     assert not result["state"]["valid"]

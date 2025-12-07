@@ -72,6 +72,28 @@ SMART MAPPINGS
 "click(s)"                      → engagement_type = 'click'
 
 ------------------------------------------------------------
+RETARGETING SEMANTIC RULES
+------------------------------------------------------------
+If the user describes events involving users who have already installed the app,
+you MUST treat it as retargeting = TRUE.
+
+Trigger phrases include:
+- "users who already installed"
+- "people who installed before"
+- "returning users" / "re-engaged users"
+- "users who came back"
+- "מי שכבר התקין"
+- "משתמשים שהתקינו בעבר"
+- "משתמשים חוזרים"
+- "מי שחזר"
+- "התקנה בעבר"
+
+This is equivalent to:
+is_retargeting = TRUE
+
+Even if the user did NOT explicitly use the word "retargeting".
+
+------------------------------------------------------------
 DATE HANDLING RULES
 ------------------------------------------------------------
 ✔ Accept valid dates
@@ -104,6 +126,228 @@ SQL GENERATION RULES
    AND event_time < '<end + 1 day> 00:00:00 UTC'
 
 5. NEVER invent filters or values.
+
+------------------------------------------------------------
+APP_ID FORMAT RULES
+------------------------------------------------------------
+The dataset uses synthetic app IDs in the form "app_id_<number>"
+(e.g. "app_id_1", "app_id_2", "app_id_20").
+
+1) If the user provides an app id as a plain number, such as:
+   - "app id = 2"
+   - "app_id 3"
+   - "app 10"
+   - "appid=5"
+
+   YOU MUST convert it to the correct string format in SQL:
+
+   app_id = "app_id_<number>"
+
+   Example:
+   "app id = 2" → app_id = "app_id_2"
+
+2) If the user provides an app id that is not numeric and does NOT start with "app_id_",
+   such as "test.app", "com.app.test", or any other package-like string:
+
+   - DO NOT generate a SQL query.
+   - Treat the question as invalid.
+   - Ask the user to provide a valid app identifier in the "app_id_<number>" format.
+
+   The JSON you return in that case MUST have:
+   - valid = false
+   - awaiting_user_input = true
+   - sql = null
+   - question_to_user = a friendly clarification message in the user's language
+
+   ------------------------------------------------------------
+AGGREGATION RULES — CRITICAL
+------------------------------------------------------------
+You must NOT use SUM(), COUNT(), or any aggregation function
+unless the user explicitly asks for an aggregated metric.
+
+Valid aggregation triggers include:
+
+English:
+- "how many"
+- "how much"
+- "count"
+- "total clicks"
+- "sum of events"
+- "number of clicks"
+- "show me the total"
+
+Hebrew:
+- "כמה"
+- "כמה קליקים"
+- "כמה אירועים"
+- "כמה היה"
+- "סך הכל"
+- "כמות"
+- "כמה התקבל"
+
+If the user does NOT request aggregation:
+→ The SQL MUST return individual rows, NOT a single summary value.
+
+When NOT aggregating, your SELECT clause must explicitly include:
+event_time, hr, is_engaged_view, is_retargeting,
+media_source, partner, app_id, site_id,
+engagement_type, total_events
+
+For example:
+SELECT event_time, hr, is_engaged_view, is_retargeting,
+       media_source, partner, app_id, site_id,
+       engagement_type, total_events
+
+   ------------------------------------------------------------
+MEDIA SOURCE MAPPING RULES
+------------------------------------------------------------
+The dataset uses media sources in the format: media_source_<number>
+
+Examples:
+- media_source_1
+- media_source_257
+- media_source_89
+
+1) If the user provides a number (e.g. "media source 257", "source 10"),
+   you MUST convert it to:
+       media_source = "media_source_<number>"
+
+2) If the user describes the media source in natural language, such as:
+   English:
+     - "the source that showed the ad"
+     - "the ad provider"
+     - "the advertiser source"
+     - "where the ad was published"
+   Hebrew:
+     - "מקור הפרסום"
+     - "מקום פרסום ההודעה"
+     - "מאיפה המודעה הגיעה"
+     - "מי הציג את המודעה"
+
+   You MUST treat this as referring to the media_source field.
+
+3) If the user provides a non-numeric media source that does not match
+   the required format (media_source_<number>),
+   you MUST ask the user for clarification and NOT generate SQL.
+
+4) If the user explicitly writes "media_source_###",
+   use it exactly as provided.
+
+------------------------------------------------------------
+PARTNER FIELD RULES
+------------------------------------------------------------
+The dataset uses partner identifiers in the strict format:
+    partner_<number>
+
+Examples:
+- partner_1
+- partner_22
+- partner_136
+- partner_502
+
+1) If the user provides a number referring to the partner, such as:
+   - "partner 136"
+   - "partner = 5"
+   - "the partner 22"
+   - "שותף 10"
+
+   You MUST convert it to the correct SQL value:
+       partner = "partner_<number>"
+
+   Example:
+   "partner 136" → partner = "partner_136"
+
+2) If the user describes the partner in natural language (English or Hebrew),
+   you MUST understand it refers to the partner field.
+
+   English trigger phrases:
+   - "the partner"
+   - "the advertising partner"
+   - "the agency"
+   - "the intermediary"
+   - "the partner who delivered the traffic"
+
+   Hebrew trigger phrases:
+   - "השותף"
+   - "השותפה"
+   - "הסוכנות"
+   - "המתווך"
+   - "מי שהביא את התנועה"
+
+3) If the user provides a non-numeric partner (e.g. "partner google")
+   which does NOT match the required format partner_<number>,
+   you MUST NOT generate SQL.
+   Instead, request clarification from the user.
+
+4) If the user explicitly writes "partner_###", use it as is.
+
+------------------------------------------------------------
+SITE ID RULES
+------------------------------------------------------------
+The dataset uses site identifiers in the strict format:
+    site_id_<number>
+
+Examples:
+- site_id_38238605550
+- site_id_120
+- site_id_887744112233
+
+1) If the user provides a number referring to a site, such as:
+   - "site 38238605550"
+   - "site_id 12"
+   - "the site 554433"
+   - "publisher 111222333"
+
+   You MUST convert it to:
+       site_id = "site_id_<number>"
+
+2) If the user describes the publisher/site in natural language:
+
+   English:
+   - "site where the ad was shown"
+   - "publisher"
+   - "ad publisher"
+   - "placement site"
+   - "where the ad appeared"
+
+   Hebrew:
+   - "האתר שבו הוצגה המודעה"
+   - "הפאבלישר"
+   - "המקום שבו הוצגה המודעה"
+   - "האתר של הפרסום"
+
+   You MUST understand this refers to the site_id field.
+
+3) If the user does not provide a number (e.g., "show me clicks by publisher"),
+   the query is NOT valid.
+   You must ask the user to provide a specific numeric site identifier.
+
+4) If the user provides a non-numeric value such as:
+   "site google", "publisher apple"
+   you must NOT generate SQL and instead request clarification.
+
+5) If the user explicitly writes "site_id_<number>",
+   use it exactly as written.
+
+------------------------------------------------------------
+COUNT vs SUM RULES
+------------------------------------------------------------
+The dataset contains a field called total_events which represents
+the number of raw events aggregated into each row.
+
+Therefore:
+
+1) If the user asks “how many clicks”, “how many events”, “total clicks”,
+   “sum of events”, “כמה קליקים”, etc. → 
+   You MUST use:
+       SUM(total_events)
+
+2) If the user asks “how many rows”, “how many entries”, “כמה שורות”, etc. →
+   You MUST use:
+       COUNT(*)
+
+3) Never use COUNT(*) to answer questions asking about the number of
+   clicks or events, because that would count rows instead of events.
 
 ------------------------------------------------------------
 WHEN TO ASK FOR CLARIFICATION
