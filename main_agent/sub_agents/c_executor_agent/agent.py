@@ -2,7 +2,7 @@ import logging
 logger = logging.getLogger("executor")
 logger.debug("🔥 ExecutorAgent loaded")
 
-from typing import Any, Dict
+from typing import Any, Dict, List
 from google.adk.agents import BaseAgent
 from google.cloud import bigquery
 
@@ -27,27 +27,21 @@ class ExecutorAgent(BaseAgent):
 
     def __init__(self):
         super().__init__(name="executor_agent")
-        self._bq_client = None
+        self._bq_client: bigquery.Client | None = None
 
     # -----------------------------------------------------
-    # BigQuery client (PATCHED — stable + fixed region)
+    # BigQuery client (single shared client, fixed region)
     # -----------------------------------------------------
-    def _get_bq_client(self):
+    def _get_bq_client(self) -> bigquery.Client:
         """
-        BigQuery jobs hang indefinitely if:
-        - job creation uses default region (US)
-        - polling is done in EU
-        or vice versa.
-
-        Fix:
-        Force project + EU region.
-        Create only ONE client shared across all async loops.
+        Create a single shared BigQuery client for the agent,
+        pinned to the practicode-2025 project and EU location.
         """
         if self._bq_client is None:
             try:
                 self._bq_client = bigquery.Client(
                     project="practicode-2025",
-                    location="EU"   # <<< CRITICAL FIX
+                    location="EU",
                 )
                 logger.debug("[Executor] BigQuery client created with EU location")
             except Exception as e:
@@ -73,9 +67,9 @@ class ExecutorAgent(BaseAgent):
                 user_question=user_question,
                 incoming=IncomingResult(
                     status="error",
-                    description="SQL validation failed: empty or invalid SQL."
+                    description="SQL validation failed: empty or invalid SQL.",
                 ),
-                db_result=None
+                db_result=None,
             ).model_dump()
 
             return {"state": output, "should_run_explainer": True}
@@ -83,48 +77,34 @@ class ExecutorAgent(BaseAgent):
         logger.debug(f"[Executor] Running SQL:\n{sql}")
 
         # ---------------------------------------------
-        # BigQuery Execution (PATCHED)
+        # BigQuery Execution
         # ---------------------------------------------
         try:
             client = self._get_bq_client()
 
-            # Force EU location to avoid hanging jobs
+            # Submit query (explicit EU location for safety)
             query_job = client.query(sql, location="EU")
             logger.debug("[Executor] BigQuery job submitted... waiting for result.")
 
-            # BLOCK until complete — SAFE NOW because region is correct
-            rows_iter = query_job.result()  # <-- THIS NO LONGER HANGS
-            rows = list(rows_iter)
+            # Single blocking call – consume the entire iterator ONCE
+            rows_iter = query_job.result(timeout=120)
+            rows: List[dict] = [dict(row.items()) for row in rows_iter]
 
             logger.debug(f"[Executor] BigQuery returned {len(rows)} rows")
 
-            # ---------------------------------------------
-            # No rows returned
-            # ---------------------------------------------
+            # No rows ⇒ still success, just empty result
             if len(rows) == 0:
-                output = AgentCOutput(
-                    user_question=user_question,
-                    incoming=IncomingResult(
-                        status="success",
-                        description="Query returned no rows."
-                    ),
-                    db_result=[]
-                ).model_dump()
-
-                return {"state": output, "should_run_explainer": True}
-
-            # ---------------------------------------------
-            # Convert rows → dicts
-            # ---------------------------------------------
-            row_dicts = [dict(r.items()) for r in rows]
+                desc = "Query returned no rows."
+            else:
+                desc = f"Returned {len(rows)} rows."
 
             output = AgentCOutput(
                 user_question=user_question,
                 incoming=IncomingResult(
                     status="success",
-                    description=f"Returned {len(rows)} rows."
+                    description=desc,
                 ),
-                db_result=row_dicts
+                db_result=rows,
             ).model_dump()
 
             return {"state": output, "should_run_explainer": True}
@@ -136,9 +116,9 @@ class ExecutorAgent(BaseAgent):
                 user_question=user_question,
                 incoming=IncomingResult(
                     status="error",
-                    description=f"Query execution failed: {e}"
+                    description=f"Query execution failed: {e}",
                 ),
-                db_result=None
+                db_result=None,
             ).model_dump()
 
             return {"state": output, "should_run_explainer": True}

@@ -156,16 +156,6 @@ Never switch the user's language.
 
 
 
-
-
-Always add:
-  LIMIT 500
-at the end of every SQL query unless the user explicitly asks for ALL rows.
-This prevents heavy full-table scans that could freeze the system.
-
-
-
-
 ------------------------------------------------------------
 REAL TABLE — ALWAYS USE:
 ------------------------------------------------------------
