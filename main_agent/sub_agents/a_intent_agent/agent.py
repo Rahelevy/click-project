@@ -1,3 +1,8 @@
+import logging
+logger = logging.getLogger("intent")
+logger.debug("🔥 IntentAgent loaded")
+
+from multiprocessing.util import debug
 from google.adk.agents import BaseAgent
 from google import genai
 import json
@@ -5,18 +10,29 @@ import os
 import re
 
 from .schemas import AgentAOutput
+from dotenv import load_dotenv
+import os
+load_dotenv()   # <-- FORCE LOAD .env
 
 
 class IntentAgent(BaseAgent):
+    model_config = {"arbitrary_types_allowed": True, "extra": "allow"}
+
+    def __repr__(self) -> str:
+        return f"IntentAgent(name={self.name})"
 
     def __init__(self):
         super().__init__(name="intent_agent")
+
         api_key = os.getenv("GOOGLE_API_KEY")
         if not api_key:
             raise ValueError("Missing GOOGLE_API_KEY environment variable.")
+
         object.__setattr__(self, "client", genai.Client(api_key=api_key))
 
-    # ----------------- SMALL HELPERS (OPTION C) -----------------
+    # =========================
+    # STATIC HELPERS FROM FRIEND
+    # =========================
 
     @staticmethod
     def _is_hebrew(text: str) -> bool:
@@ -24,13 +40,11 @@ class IntentAgent(BaseAgent):
 
     @staticmethod
     def _has_filter_hint(text: str) -> bool:
-        """בדיקה האם יש רמז לפילטר בשאלה."""
         if not text:
             return False
 
         t = text.lower()
 
-        # טריגרים כלליים
         hints = [
             "app id", "appid", "app_id", "app ",
             "media source", "media_source", "source ",
@@ -41,20 +55,19 @@ class IntentAgent(BaseAgent):
             "click", "view"
         ]
 
-        # טריגרים בעברית
         heb_hints = [
             "אפליקציה", "מקור פרסום", "מקור התנועה", "שותף",
             "פאבלישר", "אתר", "תאריך", "יום", "שעה", "ריטרגטינג",
             "התקינו בעבר", "משתמשים חוזרים"
         ]
 
-        # דפוסי מספרים (media source 257)
         numeric_patterns = [
             r"media\s*source\s*\d+",
             r"site\s*id\s*\d+",
             r"partner\s*\d+",
             r"app\s*id\s*\d+",
         ]
+
         for p in numeric_patterns:
             if re.search(p, t):
                 return True
@@ -63,12 +76,6 @@ class IntentAgent(BaseAgent):
 
     @staticmethod
     def _looks_too_broad(text: str) -> bool:
-        """
-        טריגר פשוט לזיהוי שאלות רחבות מדי כמו:
-        - "תן לי את כל הדאטה"
-        - "give me all the data"
-        - "show me everything"
-        """
         if not text:
             return True
 
@@ -88,54 +95,54 @@ class IntentAgent(BaseAgent):
 
         if any(p in t for p in heb_broad):
             return True
-
         if any(re.search(p, t) for p in broad_patterns):
             return True
 
-        # אם אין שום רמז לפילטר – גם זה "רחב מדי"
         if not IntentAgent._has_filter_hint(text):
             return True
 
         return False
 
-    # ---------------------- MAIN RUN ---------------------------
+    # =============================
+    # MAIN RUN (YOUR ORIGINAL LOGIC)
+    # =============================
 
-    def run(self, state: AgentAOutput):
+    def run(self, state):
+        logger.debug(f"[IntentAgent] Running with state= {state}")
 
-        user_question = state.question or ""
+        # Extract user question (your original)
+        try:
+            user_question = state.user_content.parts[0].text
+        except Exception:
+            user_question = getattr(state, "question", None) or str(state)
 
-        # 1) FIRST LAYER – SIMPLE TOO-BROAD CHECK (OPTION C)
         if self._looks_too_broad(user_question):
             is_hebrew = self._is_hebrew(user_question)
+            question_to_user = (
+                "השאלה מעט רחבה. אפשר למקד – למשל לפי אפליקציה, מקור תנועה, תאריך או סוג פעולה?"
+                if is_hebrew else
+                "This request is too broad. Could you narrow it down by app, source, date, or event type?"
+            )
 
-            if is_hebrew:
-                question_to_user = (
-                    "השאלה מעט רחבה. אפשר לחדד או למקד – למשל לפי אפליקציה, "
-                    "מקור תנועה, תאריך או סוג פעולה?"
-                )
-            else:
-                question_to_user = (
-                    "This request is a bit too broad. Could you narrow it down – "
-                    "for example by app, traffic source, date, or event type?"
-                )
-
-            state.valid = False
-            state.awaiting_user_input = True
-            state.missing_fields = ["filter_needed"]
-            state.question_to_user = question_to_user
-            state.sql = None
-            state.reason = "too_broad"
+            clean = {
+                "valid": False,
+                "awaiting_user_input": True,
+                "missing_fields": ["filter_needed"],
+                "question_to_user": question_to_user,
+                "sql": None,
+                "reason": "too_broad",
+                "question": user_question,
+            }
 
             return {
-                "state": state,
+                "state": clean,
                 "should_run_focus": True,
                 "should_run_executor": False,
                 "should_run_explainer": False,
             }
 
-        # 2) IF NOT TOO BROAD → LET THE MODEL DO THE HEAVY LIFTING
 
-        # ================= PROMPT ====================
+        # ---- BUILD YOUR FULL PROMPT (unchanged) ----
         prompt = f"""
 You are Agent A – the Intent Analyzer for a BigQuery dataset.
 
@@ -146,6 +153,18 @@ Respond in the same language the user used:
 - If the question is in Hebrew → respond in Hebrew.
 - If the question is in English → respond in English.
 Never switch the user's language.
+
+
+
+
+
+Always add:
+  LIMIT 500
+at the end of every SQL query unless the user explicitly asks for ALL rows.
+This prevents heavy full-table scans that could freeze the system.
+
+
+
 
 ------------------------------------------------------------
 REAL TABLE — ALWAYS USE:
@@ -231,6 +250,50 @@ DATE HANDLING RULES
 
 ✔ If date is invalid or in the future:
   → Ask user to clarify
+------------------------------------------------------------
+DATE FORMAT RULE (MM-DD-YYYY)
+------------------------------------------------------------
+If the user writes a date like "10-24-2025", always interpret it as:
+
+  MM-DD-YYYY → Month-Day-Year
+
+So:
+  "10-24-2025" → October 24, 2025
+
+Compare this against the *real current date*.
+------------------------------------------------------------
+DATE FILTERING RULE (IMPORTANT — USE PARTITIONS!)
+------------------------------------------------------------
+The table practicode-2025.clicks_data_prac.encoded_clicks is
+partitioned by DATE(event_time). Therefore:
+
+YOU MUST ALWAYS FILTER DATES USING:
+
+    DATE(event_time)
+
+and NEVER compare raw timestamps unless the user explicitly asks.
+
+Correct usage examples:
+  DATE(event_time) = "2025-10-24"
+  DATE(event_time) BETWEEN "2025-10-24" AND "2025-10-26"
+
+If the user specifies a single date like "10-24-2025",
+interpret it as MM-DD-YYYY → October 24, 2025, and generate:
+
+  DATE(event_time) = "2025-10-24"
+
+If the user specifies a date range:
+  - Normalize and reorder them if needed.
+  - Always use:
+
+      DATE(event_time) BETWEEN "<start-date>" AND "<end-date>"
+
+NEVER generate:
+  event_time >= "<date> 00:00:00 UTC"
+  event_time < "<next day> 00:00:00 UTC"
+
+because this bypasses the date partition, causes a full table scan,
+and severely slows down BigQuery. Always use DATE(event_time) filters.
 
 ------------------------------------------------------------
 SQL GENERATION RULES
@@ -505,39 +568,33 @@ USER QUESTION:
 {user_question}
 """
 
-        # =============== MODEL CALL ==========================
+        # MODEL CALL (your original)
         response = self.client.models.generate_content(
             model="gemini-2.5-flash",
             contents=prompt
         )
 
-        content = response.text.strip()
+        content = (response.text or "").strip()
 
-        # Remove ```json fences if needed
         if content.startswith("```"):
             content = content.split("\n", 1)[1]
             if content.endswith("```"):
                 content = content.rsplit("```", 1)[0].strip()
 
-        # ============ SAFE JSON PARSE ===========================
+        debug("IntentAgent input (ctx.user_content)", getattr(state, "user_content", None))
+        debug("User question extracted", user_question)
+        debug("LLM raw response", response.text)
+
+        # JSON PARSE (your original)
         try:
             parsed = json.loads(content)
-
         except Exception:
-            # Fallback logic: detect Hebrew user input
-            user_q = state.question or ""
-            is_hebrew = self._is_hebrew(user_q)
-
-            if is_hebrew:
-                question_to_user = (
-                    "לא הצלחתי להבין את הבקשה. "
-                    "תוכלי לחדד מה בדיוק תרצי לבדוק?"
-                )
-            else:
-                question_to_user = (
-                    "I could not understand your request. "
-                    "Could you please clarify what exactly you want to check?"
-                )
+            is_hebrew = self._is_hebrew(user_question)
+            question_to_user = (
+                "לא הצלחתי להבין את הבקשה. תוכלי לחדד?"
+                if is_hebrew else
+                "I could not understand your request. Could you clarify?"
+            )
 
             parsed = {
                 "valid": False,
@@ -546,21 +603,19 @@ USER QUESTION:
                 "missing_fields": ["clarification_needed"],
                 "question_to_user": question_to_user,
                 "sql": None,
-                "question": state.question,
+                "question": user_question,
             }
 
-        # ============ UPDATE STATE ===========================
-        state.valid = parsed.get("valid", False)
-        state.awaiting_user_input = parsed.get("awaiting_user_input", False)
-        state.missing_fields = parsed.get("missing_fields", [])
-        state.question_to_user = parsed.get("question_to_user")
-        state.sql = parsed.get("sql")
-        state.reason = parsed.get("reason")
-        state.question = parsed.get("question", state.question)
+        try:
+            clean_state = AgentAOutput(**parsed).model_dump()
+        except Exception:
+            clean_state = parsed
+
+        logger.debug(f"[IntentAgent] Final clean_state = {clean_state}")
 
         return {
-            "state": state,
-            "should_run_focus": not state.valid,
-            "should_run_executor": state.valid,
+            "state": clean_state,
+            "should_run_focus": not clean_state.get("valid", False),
+            "should_run_executor": clean_state.get("valid", False),
             "should_run_explainer": False,
         }

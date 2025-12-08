@@ -1,10 +1,13 @@
 from pydantic import BaseModel
-from typing import Any, Optional, List, Dict
+from typing import Literal, Any
 
-class AgentCInput(BaseModel):
-    user_question: str
-    sql: str
+
+class IncomingResult(BaseModel):
+    status: Literal["success", "error"]
+    description: str
+
 
 class AgentCOutput(BaseModel):
     user_question: str
-    db_result: List[Dict[str, Any]]
+    incoming: IncomingResult
+    db_result: Any   # list of rows OR {"total": number}
