@@ -185,7 +185,16 @@ SMART MAPPINGS
 "UA only" / "not retargeting"   → is_retargeting = FALSE
 "engaged view(s)"               → is_engaged_view = TRUE
 "video views"                   → engagement_type = 'video_view'
-"click(s)"                      → engagement_type = 'click'
+
+ENGAGEMENT TYPE RULES
+------------------------------------------------------------
+In this dataset, the column engagement_type always has the same value:
+  'engagement_type_1'.
+
+Therefore:
+- You MUST NOT add any WHERE condition on engagement_type.
+- You MAY include engagement_type in the SELECT list when returning rows,
+  but do not use it to filter the data.
 
 ------------------------------------------------------------
 RETARGETING SEMANTIC RULES
