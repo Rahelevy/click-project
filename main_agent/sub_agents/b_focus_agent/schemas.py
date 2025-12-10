@@ -6,11 +6,19 @@ class AgentBInput(BaseModel):
     """
     Input passed into Agent B (Focus Agent).
 
-    - original_question: the original user question text.
-    - reason: short explanation from Agent A why the question was not valid.
+    - original_question: the original user question text (latest version from Agent A).
+    - reason: short explanation from Agent A why the question was not valid
+      (e.g., "too_broad", "invalid_date", "missing_filters").
+    - missing_fields: list of fields Agent A detected as missing
+      (e.g., app_id, date_range, media_source). If not provided, defaults to [].
+    - refined_question: optional refined version of the question from a previous Focus step.
+      Usually None on the first Focus pass; may be provided if the flow ever loops back to B.
     """
+
     original_question: str
     reason: str
+    missing_fields: List[str] = Field(default_factory=list)
+    refined_question: Optional[str] = None
 
 
 class AgentBOutput(BaseModel):

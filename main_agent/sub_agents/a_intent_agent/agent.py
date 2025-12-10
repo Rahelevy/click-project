@@ -11,8 +11,8 @@ import re
 
 from .schemas import AgentAOutput
 from dotenv import load_dotenv
-import os
-load_dotenv()   # <-- FORCE LOAD .env
+
+load_dotenv()  # <-- FORCE LOAD .env
 
 
 class IntentAgent(BaseAgent):
@@ -110,12 +110,34 @@ class IntentAgent(BaseAgent):
     def run(self, state):
         logger.debug(f"[IntentAgent] Running with state= {state}")
 
-        # Extract user question (your original)
+        # Extract user question safely from ctx / dict / pydantic / fallback string
         try:
             user_question = state.user_content.parts[0].text
         except Exception:
-            user_question = getattr(state, "question", None) or str(state)
+            if isinstance(state, dict):
+                user_question = state.get("question")
+            else:
+                user_question = getattr(state, "question", None) or str(state)
 
+        # Edge case: no question extracted
+        if not user_question:
+            clean = {
+                "valid": False,
+                "awaiting_user_input": True,
+                "missing_fields": ["question"],
+                "question_to_user": "לא קיבלתי שאלה. תוכלי לנסח שוב?",
+                "sql": None,
+                "reason": "missing_question",
+                "question": "",
+            }
+            return {
+                "state": clean,
+                "should_run_focus": True,
+                "should_run_executor": False,
+                "should_run_explainer": False,
+            }
+
+        # Too broad / missing filters → send to Focus
         if self._looks_too_broad(user_question):
             is_hebrew = self._is_hebrew(user_question)
             question_to_user = (
@@ -141,8 +163,7 @@ class IntentAgent(BaseAgent):
                 "should_run_explainer": False,
             }
 
-
-        # ---- BUILD YOUR FULL PROMPT (unchanged) ----
+        # ---- BUILD YOUR FULL PROMPT (EXACTLY AS YOU SENT) ----
         prompt = f"""
 You are Agent A – the Intent Analyzer for a BigQuery dataset.
 
@@ -558,7 +579,7 @@ USER QUESTION:
 {user_question}
 """
 
-        # MODEL CALL (your original)
+        # MODEL CALL
         response = self.client.models.generate_content(
             model="gemini-2.5-flash",
             contents=prompt
@@ -575,7 +596,7 @@ USER QUESTION:
         debug("User question extracted", user_question)
         debug("LLM raw response", response.text)
 
-        # JSON PARSE (your original)
+        # JSON PARSE fallback (non-JSON model output)
         try:
             parsed = json.loads(content)
         except Exception:
@@ -596,6 +617,7 @@ USER QUESTION:
                 "question": user_question,
             }
 
+        # Validate against schema if possible
         try:
             clean_state = AgentAOutput(**parsed).model_dump()
         except Exception:
