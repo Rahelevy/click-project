@@ -1,9 +1,6 @@
 import logging
-logging.basicConfig(level=logging.DEBUG, force=True)
-logger = logging.getLogger("root_agent")
-logger.debug("🔥 ROOT AGENT FILE LOADED")
-
 from typing import AsyncGenerator, Dict, Any
+
 from google.adk.agents import BaseAgent
 from google.adk.agents.invocation_context import InvocationContext
 from google.adk.events import Event, EventActions
@@ -13,17 +10,16 @@ from main_agent.sub_agents.a_intent_agent.agent import IntentAgent
 from main_agent.sub_agents.b_focus_agent.agent import FocusAgent
 from main_agent.sub_agents.c_executor_agent.agent import ExecutorAgent
 from main_agent.sub_agents.d_explanation_agent.agent import ExplainerAgent
-
 from main_agent.sub_agents.d_explanation_agent.schemas import (
     ExplanationInput,
     ExecutorResult,
 )
 
-# -----------------------------------------------------
-# Root Agent
-# -----------------------------------------------------
-class RootAgent(BaseAgent):
+logger = logging.getLogger("root_agent")
+logger.debug(":feu: RootAgent module loaded")
 
+
+class RootAgent(BaseAgent):
     model_config = {"arbitrary_types_allowed": True, "extra": "allow"}
 
     def __repr__(self):
@@ -39,100 +35,198 @@ class RootAgent(BaseAgent):
             sub_agents=[intent_agent, focus_agent, executor_agent, explainer_agent],
         )
 
-    # -----------------------------------------------------
-    # Main Pipeline
-    # -----------------------------------------------------
-    def run_pipeline(self, ctx, session_state: Dict[str, Any]) -> Dict[str, Any]:
+    # ---------------------------
+    # helper: build user message when A awaits input
+    # ---------------------------
+    @staticmethod
+    def _msg_from_intent(intent_state: Dict[str, Any]) -> str:
+        reason = intent_state.get("reason")
+        missing = intent_state.get("missing_fields", []) or []
+        q_text = intent_state.get("question") or ""
 
-        logger.debug(f"[Root] ctx.user_content = {ctx.user_content}")
+        is_hebrew = any("א" <= ch <= "ת" for ch in q_text)
+
+        if reason == "missing_question" or "question" in missing:
+            return "לא קיבלתי שאלה. תוכלי לנסח שוב בבקשה?" if is_hebrew else \
+                   "I didn't get a question. Could you rephrase it?"
+        if reason == "invalid_date" or "date" in missing:
+            return "התאריך לא ברור/לא תקין. תוכלי לציין תאריך או טווח תאריכים?" if is_hebrew else \
+                   "The date is unclear/invalid. Could you provide a date or date range?"
+        if reason == "invalid_app_id" or "app_id" in missing:
+            return "ה-app id לא בפורמט תקין (app_id_<number>). תוכלי לציין אחד כזה?" if is_hebrew else \
+                   "The app id format is invalid (app_id_<number>). Please provide a valid one."
+
+        # fallback כללי
+        return "חסרים פרטים כדי להמשיך. תוכלי לחדד?" if is_hebrew else \
+               "We’re missing details to continue. Could you clarify?"
+
+    # -----------------------------------------------------
+    # Main Pipeline (synchronous helper used by async wrapper)
+    # -----------------------------------------------------
+    def run_pipeline(self, ctx: InvocationContext, session_state: Dict[str, Any]) -> Dict[str, Any]:
+        logger.debug(f"[Root] start run_pipeline, user_content={getattr(ctx, 'user_content', None)}")
         logger.debug(f"[Root] session_state keys = {list(session_state.keys())}")
 
-        # -----------------------------------------------------
-        # 1) Intent Agent - First pass
-        # -----------------------------------------------------
-        a1 = self.intent_agent.run(ctx)
-        intent_state = a1["state"]     # always a dict
+        # ---------- 1) Intent Agent (first pass) ----------
+        try:
+            a1 = self.intent_agent.run(ctx)
+        except Exception:
+            logger.exception("IntentAgent.run failed on InvocationContext, attempting fallback with question string.")
+            try:
+                q = getattr(ctx.user_content.parts[0], "text", str(ctx.user_content))
+            except Exception:
+                q = str(ctx.user_content)
+            a1 = self.intent_agent.run({"question": q})
+
+        intent_state = a1.get("state", {}) or {}
         logger.debug(f"[Root] Intent-1 output = {intent_state}")
 
-        if intent_state.get("valid"):
-            # SQL is already ready
-            final_intent = intent_state
+        # אם A מבקש קלט משתמש (בעיקר empty question) — עונים מיד, בלי B
+        if intent_state.get("awaiting_user_input"):
+            msg = self._msg_from_intent(intent_state)
+            return {
+                "stage": "awaiting_user_input",
+                "answer": msg,
+                "state": intent_state,
+            }
 
-        else:
-            # -----------------------------------------------------
-            # 2) Focus Agent
-            # -----------------------------------------------------
-            b = self.focus_agent.run(intent_state)
-            focus_state = b["state"]
+        should_run_focus = a1.get("should_run_focus", not intent_state.get("valid", False))
+        should_run_executor = a1.get("should_run_executor", intent_state.get("valid", False))
+        final_intent = intent_state
+
+        # ---------- 2) Focus Agent (if needed) ----------
+        if should_run_focus:
+            logger.debug("[Root] Running FocusAgent")
+            try:
+                b = self.focus_agent.run(intent_state)
+            except Exception:
+                logger.exception("FocusAgent.run failed when passed dict; attempting with wrapped object.")
+                b = self.focus_agent.run({"question": intent_state.get("question")})
+
+            focus_state = b.get("state", {}) or {}
             logger.debug(f"[Root] Focus output = {focus_state}")
 
-            # Case A — Focus requires user clarification
+            # Focus asks the user
             if focus_state.get("awaiting_user_input"):
-                q = focus_state.get("question_to_user") or "Can you clarify your question?"
+                q = focus_state.get("question_to_user") or \
+                    ("אפשר לחדד את הבקשה?" if any("א" <= ch <= "ת" for ch in (final_intent.get("question") or "")) else
+                     "Can you clarify your question?")
                 return {
                     "stage": "awaiting_user_input",
                     "answer": q,
                     "state": focus_state,
                 }
 
-            # Case B — Focus refined the question → run Intent again
+            # If focus provided refined question -> call IntentAgent again
             if focus_state.get("refined_question"):
                 refined_q = focus_state["refined_question"]
                 logger.debug(f"[Root] Intent-2 with refined question = {refined_q}")
 
-                a2 = self.intent_agent.run({"question": refined_q})
-                intent2_state = a2["state"]
+                try:
+                    ctx2 = InvocationContext(user_content=Part(text=refined_q), session=ctx.session)
+                except Exception:
+                    class _FakePart:
+                        def __init__(self, text):
+                            self.text = text
+
+                    class _FakeContent:
+                        def __init__(self, text):
+                            self.parts = [_FakePart(text)]
+
+                    fake_ctx2 = type("FakeCtx", (), {"user_content": _FakeContent(refined_q), "session": ctx.session})
+                    ctx2 = fake_ctx2()
+
+                try:
+                    a2 = self.intent_agent.run(ctx2)
+                except Exception:
+                    logger.exception("IntentAgent.run failed on refined InvocationContext; falling back to dict input.")
+                    a2 = self.intent_agent.run({"question": refined_q})
+
+                intent2_state = a2.get("state", {}) or {}
                 logger.debug(f"[Root] Intent-2 output = {intent2_state}")
 
                 if intent2_state.get("awaiting_user_input"):
-                    q = intent2_state.get("question_to_user")
+                    msg = self._msg_from_intent(intent2_state)
                     return {
                         "stage": "awaiting_user_input",
-                        "answer": q,
+                        "answer": msg,
                         "state": intent2_state,
                     }
 
                 final_intent = intent2_state
-
+                should_run_executor = a2.get("should_run_executor", final_intent.get("valid", False))
             else:
-                # No refinement → use initial intent_state
                 final_intent = intent_state
 
-        # -----------------------------------------------------
-        # 3) EXECUTOR (SQL execution)
-        # -----------------------------------------------------
+        # ---------- 3) Executor ----------
+        if not should_run_executor:
+            if not final_intent.get("valid"):
+                logger.debug("[Root] No executor run possible — missing info.")
+                is_hebrew = any("א" <= ch <= "ת" for ch in (final_intent.get("question") or ""))
+                ask = (
+                    "נראה שחסרים פרטים כדי להריץ את השאילתה. אפשר למקד לפי אפליקציה, מקור או טווח תאריכים?"
+                    if is_hebrew else
+                    "It seems we're missing details to run the query. Could you narrow down by app, source or date range?"
+                )
+                return {
+                    "stage": "awaiting_user_input",
+                    "answer": ask,
+                    "state": final_intent,
+                }
+
         executor_input = {
             "user_question": final_intent.get("question"),
             "sql": final_intent.get("sql"),
         }
+        logger.debug(f"[Root] Executor input = {executor_input}")
 
-        c = self.executor_agent.run(executor_input)
-        exec_state = c["state"]   # dict from AgentCOutput
+        try:
+            c = self.executor_agent.run(executor_input)
+        except Exception:
+            logger.exception("ExecutorAgent.run failed with dict; attempting keyword fallback.")
+            c = self.executor_agent.run(
+                user_question=executor_input.get("user_question"),
+                sql=executor_input.get("sql")
+            )
+
+        exec_state = c.get("state", {}) or {}
         logger.debug(f"[Root] Executor output = {exec_state}")
 
-        # -----------------------------------------------------
-        # 4) EXPLAINER
-        # -----------------------------------------------------
-        explain_input = ExplanationInput(
-            user_question=exec_state["user_question"],
-            incoming=ExecutorResult(
-                status=exec_state["incoming"]["status"],
-                description=exec_state["incoming"]["description"],
-            ),
-            db_result=exec_state.get("db_result"),
-        )
+        # ---------- 4) Explainer ----------
+        try:
+            incoming = exec_state.get("incoming", {})
+            explain_input = ExplanationInput(
+                user_question=exec_state.get("user_question") or executor_input.get("user_question"),
+                incoming=ExecutorResult(
+                    status=incoming.get("status"),
+                    description=incoming.get("description"),
+                ),
+                db_result=exec_state.get("db_result"),
+            )
+        except Exception:
+            explain_input = {
+                "user_question": exec_state.get("user_question") or executor_input.get("user_question"),
+                "incoming": exec_state.get("incoming"),
+                "db_result": exec_state.get("db_result"),
+            }
 
-        d = self.explainer_agent.run(explain_input)
-        explain_state = d["state"]   # Pydantic model
+        try:
+            d = self.explainer_agent.run(explain_input)
+        except Exception:
+            logger.exception("ExplainerAgent.run failed; attempting dict input.")
+            d = self.explainer_agent.run(
+                explain_input if isinstance(explain_input, dict) else explain_input.model_dump()
+            )
+
+        explain_state = d.get("state", {}) or {}
         logger.debug(f"[Root] Explainer output = {explain_state}")
 
-        # Convert Pydantic → dict to store in ADK session safely
         if hasattr(explain_state, "model_dump"):
             explain_state = explain_state.model_dump()
 
         return {
             "stage": "done",
-            "answer": explain_state.get("description", ""),
+            "answer": explain_state.get("description", "") if isinstance(explain_state, dict) else str(explain_state),
             "state": explain_state,
         }
 
@@ -140,15 +234,12 @@ class RootAgent(BaseAgent):
     # ADK Async Wrapper
     # -----------------------------------------------------
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
-
         session_state = ctx.session.state.get("root_state", {})
-
-        logger.debug(f"[Root] Async start: {ctx.user_content}")
+        logger.debug(f"[Root] Async start: {getattr(ctx, 'user_content', None)}")
 
         result = self.run_pipeline(ctx, session_state)
-        logger.debug(f"[Root] Final Output = stage={result['stage']} answer={result['answer']}")
+        logger.debug(f"[Root] Final Output = stage={result.get('stage')} answer={result.get('answer')}")
 
-        # Update session
         actions = EventActions(
             state_delta={
                 "root_state": result["state"],
