@@ -1,4 +1,4 @@
-*.json
+﻿*.json
 .env
 # Python cache
 __pycache__/

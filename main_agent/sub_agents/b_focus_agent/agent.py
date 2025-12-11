@@ -28,7 +28,7 @@ class FocusAgent(BaseAgent):
         if isinstance(state, dict):
             return AgentBInput(
                 original_question=state.get("question", ""),
-                reason=state.get("reason", "missing_filters"),
+                reason=state.get("reason") or "missing_filters",   # ✅ תיקון כאן
                 missing_fields=state.get("missing_fields", []),
                 refined_question=state.get("refined_question"),
             )
@@ -36,7 +36,7 @@ class FocusAgent(BaseAgent):
         # Case 3: fallback object
         return AgentBInput(
             original_question=getattr(state, "question", None) or str(state),
-            reason=getattr(state, "reason", None) or "missing_filters",
+            reason=getattr(state, "reason", None) or "missing_filters",  # ✅ אותו תיקון
             missing_fields=getattr(state, "missing_fields", None) or [],
             refined_question=getattr(state, "refined_question", None),
         )
@@ -49,8 +49,20 @@ class FocusAgent(BaseAgent):
         missing_fields = state.missing_fields
         reason = state.reason
 
+        # >>> ADDED: language detection + rule
+        is_hebrew = any("א" <= ch <= "ת" for ch in (original_question or ""))
+        lang_rule = (
+            "Respond in Hebrew, because the user's question is in Hebrew."
+            if is_hebrew else
+            "Respond in English, because the user's question is in English."
+        )
+
         prompt = f"""
 You are Agent B – the Focus Agent.
+
+LANGUAGE RULE (IMPORTANT):
+{lang_rule}
+Never switch the user's language.
 
 Your tasks:
 1. Call detect_missing_fields(original_question) to determine which filter fields are missing.
@@ -102,7 +114,6 @@ ALWAYS return JSON ONLY matching AgentBOutput exactly.
 
 --------------------------------
 INPUT:
---------------------------------
 
 original_question: {original_question}
 refined_question: {refined_question}

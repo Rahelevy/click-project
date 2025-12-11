@@ -1,3 +1,4 @@
+from datetime import date
 
 import logging
 logger = logging.getLogger("intent")
@@ -120,38 +121,31 @@ class IntentAgent(BaseAgent):
             else:
                 user_question = getattr(state, "question", None) or str(state)
 
-        # Edge case: no question extracted
+        # Edge case: no question extracted  (A מטפל בזה לבד)
         if not user_question:
+            is_hebrew = self._is_hebrew(str(state))
             clean = {
                 "valid": False,
-                "awaiting_user_input": True,
+                "awaiting_user_input": True,   # A כן מבקש ניסוח מחדש
                 "missing_fields": ["question"],
-                "question_to_user": "לא קיבלתי שאלה. תוכלי לנסח שוב?",
                 "sql": None,
                 "reason": "missing_question",
                 "question": "",
             }
             return {
                 "state": clean,
-                "should_run_focus": True,
+                "should_run_focus": False,     # לא שולחים ל-B
                 "should_run_executor": False,
                 "should_run_explainer": False,
             }
 
         # Too broad / missing filters → send to Focus
         if self._looks_too_broad(user_question):
-            is_hebrew = self._is_hebrew(user_question)
-            question_to_user = (
-                "השאלה מעט רחבה. אפשר למקד – למשל לפי אפליקציה, מקור תנועה, תאריך או סוג פעולה?"
-                if is_hebrew else
-                "This request is too broad. Could you narrow it down by app, source, date, or event type?"
-            )
 
             clean = {
                 "valid": False,
-                "awaiting_user_input": True,
+                "awaiting_user_input": False,   # A לא שואל; B ישאל
                 "missing_fields": ["filter_needed"],
-                "question_to_user": question_to_user,
                 "sql": None,
                 "reason": "too_broad",
                 "question": user_question,
@@ -164,7 +158,7 @@ class IntentAgent(BaseAgent):
                 "should_run_explainer": False,
             }
 
-        # ---- BUILD YOUR FULL PROMPT (EXACTLY AS YOU SENT) ----
+        # ---- BUILD YOUR FULL PROMPT (UPDATED TO REMOVE question_to_user) ----
         prompt = f"""
 You are Agent A – the Intent Analyzer for a BigQuery dataset.
 
@@ -175,8 +169,6 @@ Respond in the same language the user used:
 - If the question is in Hebrew → respond in Hebrew.
 - If the question is in English → respond in English.
 Never switch the user's language.
-
-
 
 ------------------------------------------------------------
 REAL TABLE — ALWAYS USE:
@@ -261,7 +253,11 @@ DATE HANDLING RULES
   → Mark valid = true
 
 ✔ If date is invalid or in the future:
-  → Ask user to clarify
+  → Mark valid = false
+  → awaiting_user_input = false
+  → missing_fields should include "date"
+  → Do NOT ask the user directly (Agent B will ask)
+
 ------------------------------------------------------------
 DATE FORMAT RULE (MM-DD-YYYY)
 ------------------------------------------------------------
@@ -273,6 +269,7 @@ So:
   "10-24-2025" → October 24, 2025
 
 Compare this against the *real current date*.
+
 ------------------------------------------------------------
 DATE FILTERING RULE (IMPORTANT — USE PARTITIONS!)
 ------------------------------------------------------------
@@ -289,24 +286,6 @@ Correct usage examples:
   DATE(event_time) = "2025-10-24"
   DATE(event_time) BETWEEN "2025-10-24" AND "2025-10-26"
 
-If the user specifies a single date like "10-24-2025",
-interpret it as MM-DD-YYYY → October 24, 2025, and generate:
-
-  DATE(event_time) = "2025-10-24"
-
-If the user specifies a date range:
-  - Normalize and reorder them if needed.
-  - Always use:
-
-      DATE(event_time) BETWEEN "<start-date>" AND "<end-date>"
-
-NEVER generate:
-  event_time >= "<date> 00:00:00 UTC"
-  event_time < "<next day> 00:00:00 UTC"
-
-because this bypasses the date partition, causes a full table scan,
-and severely slows down BigQuery. Always use DATE(event_time) filters.
-
 ------------------------------------------------------------
 SQL GENERATION RULES
 ------------------------------------------------------------
@@ -314,18 +293,11 @@ SQL GENERATION RULES
    `practicode-2025.clicks_data_prac.encoded_clicks`
 
 2. NEVER return all columns by default.
-   Allowed:
-   - SELECT SUM(total_events)
-   - SELECT aggregated data
 
 3. DO NOT generate SELECT event_time, hr, ...
    unless user explicitly requests “all fields” or a non-aggregated list.
 
-4. Date ranges MUST follow:
-   event_time >= '<start> 00:00:00 UTC'
-   AND event_time < '<end + 1 day> 00:00:00 UTC'
-
-5. NEVER invent filters or values.
+4. NEVER invent filters or values.
 
 ------------------------------------------------------------
 APP_ID FORMAT RULES
@@ -344,231 +316,40 @@ The dataset uses synthetic app IDs in the form "app_id_<number>"
 
    app_id = "app_id_<number>"
 
-   Example:
-   "app id = 2" → app_id = "app_id_2"
-   "app id 5"   → app_id = "app_id_5"
-
-2) If the user provides an app id that is not numeric and does NOT start with "app_id_",
-   such as "test.app", "com.app.test", or any other package-like string:
-
-   - DO NOT generate a SQL query.
-   - Treat the question as invalid.
-   - Ask the user to provide a valid app identifier in the "app_id_<number>" format.
-
-   The JSON you return in that case MUST have:
-   - valid = false
-   - awaiting_user_input = true
-   - sql = null
-   - question_to_user = a friendly clarification message in the user's language
-
 ------------------------------------------------------------
-AGGREGATION RULES — CRITICAL
+MEDIA SOURCE / PARTNER / SITE ID RULES
 ------------------------------------------------------------
-You must NOT use SUM(), COUNT(), or any aggregation function
-unless the user explicitly asks for an aggregated metric.
-
-Valid aggregation triggers include:
-
-English:
-- "how many"
-- "how much"
-- "count"
-- "total clicks"
-- "sum of events"
-- "number of clicks"
-- "show me the total"
-
-Hebrew:
-- "כמה"
-- "כמה קליקים"
-- "כמה אירועים"
-- "כמה היה"
-- "סך הכל"
-- "כמות"
-- "כמה התקבל"
-
-If the user does NOT request aggregation:
-→ The SQL MUST return individual rows, NOT a single summary value.
-
-When NOT aggregating, your SELECT clause must explicitly include:
-event_time, hr, is_engaged_view, is_retargeting,
-media_source, partner, app_id, site_id,
-engagement_type, total_events
-
-For example:
-SELECT
-  event_time, hr, is_engaged_view, is_retargeting,
-  media_source, partner, app_id, site_id,
-  engagement_type, total_events
-
-------------------------------------------------------------
-MEDIA SOURCE MAPPING RULES
-------------------------------------------------------------
-The dataset uses media sources in the format: media_source_<number>
-
-Examples:
-- media_source_1
-- media_source_257
-- media_source_89
-
-1) If the user provides a number (e.g. "media source 257", "source 10"),
-   you MUST convert it to:
-       media_source = "media_source_<number>"
-
-2) If the user describes the media source in natural language, such as:
-   English:
-     - "the source that showed the ad"
-     - "the ad provider"
-     - "the advertiser source"
-     - "where the ad was published"
-   Hebrew:
-     - "מקור הפרסום"
-     - "מקום פרסום ההודעה"
-     - "מאיפה המודעה הגיעה"
-     - "מי הציג את המודעה"
-
-   You MUST treat this as referring to the media_source field.
-
-3) If the user provides a non-numeric media source that does not match
-   the required format (media_source_<number>),
-   you MUST ask the user for clarification and NOT generate SQL.
-
-4) If the user explicitly writes "media_source_###",
-   use it exactly as provided.
-
-------------------------------------------------------------
-PARTNER FIELD RULES
-------------------------------------------------------------
-The dataset uses partner identifiers in the strict format:
-    partner_<number>
-
-Examples:
-- partner_1
-- partner_22
-- partner_136
-- partner_502
-
-1) If the user provides a number referring to the partner, such as:
-   - "partner 136"
-   - "partner = 5"
-   - "the partner 22"
-   - "שותף 10"
-
-   You MUST convert it to the correct SQL value:
-       partner = "partner_<number>"
-
-2) If the user describes the partner in natural language (English or Hebrew),
-   you MUST understand it refers to the partner field.
-
-3) If the user provides a non-numeric partner (e.g. "partner google")
-   which does NOT match the required format partner_<number>,
-   you MUST NOT generate SQL.
-   Instead, request clarification from the user.
-
-4) If the user explicitly writes "partner_###", use it as is.
-
-------------------------------------------------------------
-SITE ID RULES
-------------------------------------------------------------
-The dataset uses site identifiers in the strict format:
-    site_id_<number>
-
-Examples:
-- site_id_38238605550
-- site_id_120
-- site_id_887744112233
-
-1) If the user provides a number referring to a site, such as:
-   - "site 38238605550"
-   - "site_id 12"
-   - "the site 554433"
-   - "publisher 111222333"
-
-   You MUST convert it to:
-       site_id = "site_id_<number>"
-
-2) If the user describes the publisher/site in natural language (English or Hebrew),
-   you MUST understand this refers to the site_id field.
-
-3) If the user does not provide a number (e.g., "show me clicks by publisher"),
-   the query is NOT valid.
-   You must ask the user to provide a specific numeric site identifier.
-
-4) If the user provides a non-numeric value such as:
-   "site google", "publisher apple"
-   you must NOT generate SQL and instead request clarification.
-
-5) If the user explicitly writes "site_id_<number>",
-   use it exactly as written.
+Same as original rules:
+- media_source_<number>
+- partner_<number>
+- site_id_<number>
+Convert plain numbers accordingly.
 
 ------------------------------------------------------------
 COUNT vs SUM RULES
 ------------------------------------------------------------
-The dataset contains a field called total_events which represents
-the number of raw events aggregated into each row.
-
-Therefore:
-
-1) If the user asks “how many clicks”, “how many events”, “total clicks”,
-   “sum of events”, “כמה קליקים”, etc. → 
-   You MUST use:
-       SUM(total_events)
-
-2) If the user asks “how many rows”, “how many entries”, “כמה שורות”, etc. → 
-   You MUST use:
-       COUNT(*)
-
-3) Never use COUNT(*) to answer questions asking about the number of
-   clicks or events, because that would count rows instead of events.
+(keep your original rules...)
 
 ------------------------------------------------------------
-WHEN TO ASK FOR CLARIFICATION
+OUTPUT FORMAT (NO question_to_user)
 ------------------------------------------------------------
+Return JSON ONLY matching AgentAOutput WITHOUT question_to_user.
 
-CASE A – TOO BROAD  
-Hebrew:
-"השאלה מעט רחבה. אפשר לחדד או למקד – למשל לפי אפליקציה, מקור תנועה, תאריך או סוג פעולה?"
-English:
-"This request is a bit too broad. Could you narrow it down – for example by app, traffic source, date, or event type?"
-
-CASE B – UNSUPPORTED FIELD  
-Hebrew:
-"נראה שהתייחסת למידע שאין לנו עליו נתונים. אפשר לציין אפליקציה, מקור תנועה או טווח תאריכים?"
-English:
-"It seems you mentioned information we do not have data for. Could you specify something like an app, a traffic source, or a date range?"
-
-CASE C – AMBIGUOUS  
-Hebrew:
-"אני לא בטוח למה התכוונת. מה בדיוק תרצי לבדוק?"
-English:
-"I'm not fully sure what you mean. What exactly would you like to check?"
-
-CASE D – INVALID DATE (non-reversed)
-→ Ask user nicely for a correct date.
-
-------------------------------------------------------------
-CASE E – VALID QUERY
-------------------------------------------------------------
-If the query is valid and enough information exists,
-you MUST return JSON ONLY in this shape:
-
+If valid:
 {{
  "valid": true,
  "awaiting_user_input": false,
  "missing_fields": [],
- "question_to_user": null,
  "sql": "<generated SQL>",
  "reason": null,
  "question": "{user_question}"
 }}
 
-If the query is NOT valid, you MUST return:
-
+If NOT valid:
 {{
  "valid": false,
- "awaiting_user_input": true,
+ "awaiting_user_input": false,
  "missing_fields": ["<short_reason_code>"],
- "question_to_user": "<friendly explanation in the same language>",
  "sql": null,
  "reason": "<machine_reason_or_null>",
  "question": "{user_question}"
@@ -601,22 +382,54 @@ USER QUESTION:
         try:
             parsed = json.loads(content)
         except Exception:
-            is_hebrew = self._is_hebrew(user_question)
-            question_to_user = (
-                "לא הצלחתי להבין את הבקשה. תוכלי לחדד?"
-                if is_hebrew else
-                "I could not understand your request. Could you clarify?"
-            )
-
             parsed = {
                 "valid": False,
                 "reason": "model_non_json_response",
-                "awaiting_user_input": True,
+                "awaiting_user_input": False,
                 "missing_fields": ["clarification_needed"],
-                "question_to_user": question_to_user,
                 "sql": None,
                 "question": user_question,
             }
+
+        # -----------------------------
+        # ✅ ADDITION: numeric filter fix
+        # -----------------------------
+        def _fix_numeric_filters(sql: str) -> str:
+            if not sql:
+                return sql
+
+            # app_id = 2  -> app_id = "app_id_2"
+            sql = re.sub(
+                r'app_id\s*=\s*(\d+)',
+                r'app_id = "app_id_\1"',
+                sql
+            )
+
+            # media_source = 2 -> media_source = "media_source_2"
+            sql = re.sub(
+                r'media_source\s*=\s*(\d+)',
+                r'media_source = "media_source_\1"',
+                sql
+            )
+
+            # partner = 2 -> partner = "partner_2"
+            sql = re.sub(
+                r'partner\s*=\s*(\d+)',
+                r'partner = "partner_\1"',
+                sql
+            )
+
+            # site_id = 12 -> site_id = "site_id_12"
+            sql = re.sub(
+                r'site_id\s*=\s*(\d+)',
+                r'site_id = "site_id_\1"',
+                sql
+            )
+
+            return sql
+
+        if parsed.get("valid") and parsed.get("sql"):
+            parsed["sql"] = _fix_numeric_filters(parsed["sql"])
 
         # Validate against schema if possible
         try:

@@ -1,5 +1,6 @@
 import logging
 from typing import AsyncGenerator, Dict, Any
+
 from google.adk.agents import BaseAgent
 from google.adk.agents.invocation_context import InvocationContext
 from google.adk.events import Event, EventActions
@@ -30,97 +31,130 @@ class RootAgent(BaseAgent):
             explainer_agent=explainer_agent,
             sub_agents=[intent_agent, focus_agent, executor_agent, explainer_agent],
         )
+
+    # ---------------------------
+    # helper: build user message when A awaits input
+    # ---------------------------
+    @staticmethod
+    def _msg_from_intent(intent_state: Dict[str, Any]) -> str:
+        reason = intent_state.get("reason")
+        missing = intent_state.get("missing_fields", []) or []
+        q_text = intent_state.get("question") or ""
+
+        is_hebrew = any("א" <= ch <= "ת" for ch in q_text)
+
+        if reason == "missing_question" or "question" in missing:
+            return "לא קיבלתי שאלה. תוכלי לנסח שוב בבקשה?" if is_hebrew else \
+                   "I didn't get a question. Could you rephrase it?"
+        if reason == "invalid_date" or "date" in missing:
+            return "התאריך לא ברור/לא תקין. תוכלי לציין תאריך או טווח תאריכים?" if is_hebrew else \
+                   "The date is unclear/invalid. Could you provide a date or date range?"
+        if reason == "invalid_app_id" or "app_id" in missing:
+            return "ה-app id לא בפורמט תקין (app_id_<number>). תוכלי לציין אחד כזה?" if is_hebrew else \
+                   "The app id format is invalid (app_id_<number>). Please provide a valid one."
+
+        # fallback כללי
+        return "חסרים פרטים כדי להמשיך. תוכלי לחדד?" if is_hebrew else \
+               "We’re missing details to continue. Could you clarify?"
+
     # -----------------------------------------------------
     # Main Pipeline (synchronous helper used by async wrapper)
     # -----------------------------------------------------
     def run_pipeline(self, ctx: InvocationContext, session_state: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        ctx: InvocationContext from ADK (contains user_content and session)
-        session_state: dict saved in session (may be empty)
-        """
         logger.debug(f"[Root] start run_pipeline, user_content={getattr(ctx, 'user_content', None)}")
         logger.debug(f"[Root] session_state keys = {list(session_state.keys())}")
+
         # ---------- 1) Intent Agent (first pass) ----------
-        # Always call IntentAgent with the InvocationContext for robustness
         try:
             a1 = self.intent_agent.run(ctx)
-        except Exception as e:
+        except Exception:
             logger.exception("IntentAgent.run failed on InvocationContext, attempting fallback with question string.")
-            # fallback: extract question string and pass as dict
             try:
                 q = getattr(ctx.user_content.parts[0], "text", str(ctx.user_content))
             except Exception:
                 q = str(ctx.user_content)
             a1 = self.intent_agent.run({"question": q})
+
         intent_state = a1.get("state", {}) or {}
         logger.debug(f"[Root] Intent-1 output = {intent_state}")
-        # If intent says it's valid we can possibly skip focus
-        # but still respect the agent's flags if provided
+
+        # אם A מבקש קלט משתמש (בעיקר empty question) — עונים מיד, בלי B
+        if intent_state.get("awaiting_user_input"):
+            msg = self._msg_from_intent(intent_state)
+            return {
+                "stage": "awaiting_user_input",
+                "answer": msg,
+                "state": intent_state,
+            }
+
         should_run_focus = a1.get("should_run_focus", not intent_state.get("valid", False))
         should_run_executor = a1.get("should_run_executor", intent_state.get("valid", False))
         final_intent = intent_state
+
         # ---------- 2) Focus Agent (if needed) ----------
         if should_run_focus:
             logger.debug("[Root] Running FocusAgent")
-            # FocusAgent likely expects the intent_state dict as input
             try:
                 b = self.focus_agent.run(intent_state)
-            except Exception as e:
+            except Exception:
                 logger.exception("FocusAgent.run failed when passed dict; attempting with wrapped object.")
-                # as a last resort, pass the question string
                 b = self.focus_agent.run({"question": intent_state.get("question")})
+
             focus_state = b.get("state", {}) or {}
             logger.debug(f"[Root] Focus output = {focus_state}")
-            # If focus needs clarification from user, return early
+
+            # Focus asks the user
             if focus_state.get("awaiting_user_input"):
-                q = focus_state.get("question_to_user") or "Can you clarify your question?"
+                q = focus_state.get("question_to_user") or \
+                    ("אפשר לחדד את הבקשה?" if any("א" <= ch <= "ת" for ch in (final_intent.get("question") or "")) else
+                     "Can you clarify your question?")
                 return {
                     "stage": "awaiting_user_input",
                     "answer": q,
                     "state": focus_state,
                 }
-            # If focus provided a refined question — call IntentAgent again with InvocationContext
+
+            # If focus provided refined question -> call IntentAgent again
             if focus_state.get("refined_question"):
                 refined_q = focus_state["refined_question"]
                 logger.debug(f"[Root] Intent-2 with refined question = {refined_q}")
-                # Build a small InvocationContext for the refined question but reuse the session
+
                 try:
                     ctx2 = InvocationContext(user_content=Part(text=refined_q), session=ctx.session)
                 except Exception:
-                    # InvocationContext may expect a slightly different shape; construct minimal object compatible with IntentAgent
-                    # IntentAgent expects .user_content.parts[0].text so we craft a tiny object
                     class _FakePart:
                         def __init__(self, text):
                             self.text = text
+
                     class _FakeContent:
                         def __init__(self, text):
                             self.parts = [_FakePart(text)]
+
                     fake_ctx2 = type("FakeCtx", (), {"user_content": _FakeContent(refined_q), "session": ctx.session})
                     ctx2 = fake_ctx2()
-                # Try calling intent_agent with the new context
+
                 try:
                     a2 = self.intent_agent.run(ctx2)
                 except Exception:
-                    # last-resort: call with dict
                     logger.exception("IntentAgent.run failed on refined InvocationContext; falling back to dict input.")
                     a2 = self.intent_agent.run({"question": refined_q})
+
                 intent2_state = a2.get("state", {}) or {}
                 logger.debug(f"[Root] Intent-2 output = {intent2_state}")
                 if intent2_state.get("awaiting_user_input"):
-                    q = intent2_state.get("question_to_user")
+                    msg = self._msg_from_intent(intent2_state)
                     return {
                         "stage": "awaiting_user_input",
-                        "answer": q,
+                        "answer": msg,
                         "state": intent2_state,
                     }
                 final_intent = intent2_state
                 should_run_executor = a2.get("should_run_executor", final_intent.get("valid", False))
             else:
-                # focus didn't refine → keep previous final_intent
                 final_intent = intent_state
+
         # ---------- 3) Executor ----------
         if not should_run_executor:
-            # If intent not valid and focus didn't request clarification, ask user to clarify.
             if not final_intent.get("valid"):
                 logger.debug("[Root] No executor run possible — missing info.")
                 is_hebrew = any("א" <= ch <= "ת" for ch in (final_intent.get("question") or ""))
@@ -134,6 +168,7 @@ class RootAgent(BaseAgent):
                     "answer": ask,
                     "state": final_intent,
                 }
+
         executor_input = {
             "user_question": final_intent.get("question"),
             "sql": final_intent.get("sql"),
@@ -199,6 +234,7 @@ class RootAgent(BaseAgent):
             explain_state = explain_state.model_dump()
         return {
             "stage": "done",
+            "answer": explain_state.get("description", "") if isinstance(explain_state, dict) else str(explain_state),
             "answer": explain_state.get("description", "") if isinstance(explain_state, dict) else str(explain_state),
             "state": explain_state,
         }

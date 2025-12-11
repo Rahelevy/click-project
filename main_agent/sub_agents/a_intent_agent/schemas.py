@@ -7,23 +7,9 @@ class UserQuestion(BaseModel):
 
 
 class AgentAOutput(BaseModel):
-    # Est-ce que la question est valide pour générer du SQL ?
     valid: bool = False
-
-    # Dernière version de la question (éventuellement raffinée plus tard)
     question: str
-
-    # SQL généré (seulement si valid == True)
     sql: Optional[str] = None
-
-    # FIXED: keeps "too_broad" instead of overriding with None
-    reason: Optional[str] = Field(default=None)
-
-    # 👉 Nouveau : est-ce qu'on a besoin d'une réponse utilisateur ?
+    reason: Optional[str] = None
     awaiting_user_input: bool = False
-
-    # 👉 Nouveau : quels champs manquent (date, app_id, metric, etc.)
     missing_fields: List[str] = Field(default_factory=list)
-
-    # 👉 Nouveau : question à poser à l'utilisateur
-    question_to_user: Optional[str] = None
