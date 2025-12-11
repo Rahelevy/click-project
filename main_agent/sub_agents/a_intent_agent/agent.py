@@ -1,4 +1,5 @@
 from datetime import date
+
 import logging
 logger = logging.getLogger("intent")
 logger.debug("🔥 IntentAgent loaded")

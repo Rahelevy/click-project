@@ -5,7 +5,6 @@ from google.adk.agents import BaseAgent
 from google.adk.agents.invocation_context import InvocationContext
 from google.adk.events import Event, EventActions
 from google.genai.types import Content, Part
-
 from main_agent.sub_agents.a_intent_agent.agent import IntentAgent
 from main_agent.sub_agents.b_focus_agent.agent import FocusAgent
 from main_agent.sub_agents.c_executor_agent.agent import ExecutorAgent
@@ -14,17 +13,15 @@ from main_agent.sub_agents.d_explanation_agent.schemas import (
     ExplanationInput,
     ExecutorResult,
 )
+from main_agent.cache.bq_cache import get as bq_cache_get, set as bq_cache_set
+
 
 logger = logging.getLogger("root_agent")
 logger.debug(":feu: RootAgent module loaded")
-
-
 class RootAgent(BaseAgent):
     model_config = {"arbitrary_types_allowed": True, "extra": "allow"}
-
     def __repr__(self):
         return f"RootAgent(name={self.name})"
-
     def __init__(self, intent_agent, focus_agent, executor_agent, explainer_agent):
         super().__init__(
             name="main_agent_root",
@@ -144,7 +141,6 @@ class RootAgent(BaseAgent):
 
                 intent2_state = a2.get("state", {}) or {}
                 logger.debug(f"[Root] Intent-2 output = {intent2_state}")
-
                 if intent2_state.get("awaiting_user_input"):
                     msg = self._msg_from_intent(intent2_state)
                     return {
@@ -152,7 +148,6 @@ class RootAgent(BaseAgent):
                         "answer": msg,
                         "state": intent2_state,
                     }
-
                 final_intent = intent2_state
                 should_run_executor = a2.get("should_run_executor", final_intent.get("valid", False))
             else:
@@ -180,19 +175,36 @@ class RootAgent(BaseAgent):
         }
         logger.debug(f"[Root] Executor input = {executor_input}")
 
-        try:
-            c = self.executor_agent.run(executor_input)
-        except Exception:
-            logger.exception("ExecutorAgent.run failed with dict; attempting keyword fallback.")
-            c = self.executor_agent.run(
-                user_question=executor_input.get("user_question"),
-                sql=executor_input.get("sql")
-            )
+        # Check cache first (if SQL present). If hit, skip calling the Executor.
+        exec_state = None
+        sql_for_cache = final_intent.get("sql")
+        params_for_cache = final_intent.get("params")
+        if sql_for_cache:
+            try:
+                cached = bq_cache_get(sql_for_cache, params_for_cache)
+                if cached is not None:
+                    logger.info("[Root] CACHE HIT for query_hash")
+                    exec_state = cached
+            except Exception:
+                logger.exception("Cache lookup failed — proceeding to executor")
 
-        exec_state = c.get("state", {}) or {}
-        logger.debug(f"[Root] Executor output = {exec_state}")
+        if exec_state is None:
+            try:
+                c = self.executor_agent.run(executor_input)
+            except Exception:
+                logger.exception("ExecutorAgent.run failed with dict; attempting to pass via keyword fallback.")
+                c = self.executor_agent.run(user_question=executor_input.get("user_question"), sql=executor_input.get("sql"))
+            exec_state = c.get("state", {}) or {}
+            logger.debug(f"[Root] Executor output = {exec_state}")
 
+            # Only cache successful executor results (best-effort): store if exec_state non-empty
+            try:
+                if sql_for_cache and exec_state:
+                    bq_cache_set(sql_for_cache, exec_state, params=params_for_cache)
+            except Exception:
+                logger.exception("Failed to write cache for query")
         # ---------- 4) Explainer ----------
+        # Explainer expects ExplanationInput pydantic. build it defensively.
         try:
             incoming = exec_state.get("incoming", {})
             explain_input = ExplanationInput(
@@ -204,61 +216,52 @@ class RootAgent(BaseAgent):
                 db_result=exec_state.get("db_result"),
             )
         except Exception:
+            # last-resort: pass a simple dict to explainer_agent.run
             explain_input = {
                 "user_question": exec_state.get("user_question") or executor_input.get("user_question"),
                 "incoming": exec_state.get("incoming"),
                 "db_result": exec_state.get("db_result"),
             }
-
         try:
             d = self.explainer_agent.run(explain_input)
         except Exception:
-            logger.exception("ExplainerAgent.run failed; attempting dict input.")
-            d = self.explainer_agent.run(
-                explain_input if isinstance(explain_input, dict) else explain_input.model_dump()
-            )
-
+            logger.exception("ExplainerAgent.run failed; attempting with dict input.")
+            d = self.explainer_agent.run(explain_input if isinstance(explain_input, dict) else explain_input.model_dump())
         explain_state = d.get("state", {}) or {}
         logger.debug(f"[Root] Explainer output = {explain_state}")
-
+        # Convert Pydantic -> dict if needed
         if hasattr(explain_state, "model_dump"):
             explain_state = explain_state.model_dump()
-
         return {
             "stage": "done",
             "answer": explain_state.get("description", "") if isinstance(explain_state, dict) else str(explain_state),
+            "answer": explain_state.get("description", "") if isinstance(explain_state, dict) else str(explain_state),
             "state": explain_state,
         }
-
     # -----------------------------------------------------
     # ADK Async Wrapper
     # -----------------------------------------------------
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
         session_state = ctx.session.state.get("root_state", {})
         logger.debug(f"[Root] Async start: {getattr(ctx, 'user_content', None)}")
-
         result = self.run_pipeline(ctx, session_state)
         logger.debug(f"[Root] Final Output = stage={result.get('stage')} answer={result.get('answer')}")
-
+        # Update session
         actions = EventActions(
             state_delta={
                 "root_state": result["state"],
                 "stage": result["stage"],
             }
         )
-
         msg = Content(
             role="assistant",
             parts=[Part(text=result.get("answer", "No answer returned."))],
         )
-
         yield Event(
             author=self.name,
             content=msg,
             actions=actions,
         )
-
-
 root_agent = RootAgent(
     intent_agent=IntentAgent(),
     focus_agent=FocusAgent(),
