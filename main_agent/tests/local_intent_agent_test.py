@@ -1,4 +1,3 @@
-#$env:GOOGLE_API_KEY="AIzaSyBCCqq1cfwn0jUZ8RVPVEWV9AfcGSi0gLA"
 import os
 from main_agent.sub_agents.a_intent_agent import IntentAgent
 
