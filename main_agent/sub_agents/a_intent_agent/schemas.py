@@ -16,8 +16,8 @@ class AgentAOutput(BaseModel):
     # SQL généré (seulement si valid == True)
     sql: Optional[str] = None
 
-    # Explication pourquoi ce n'est pas valide (si valid == False)
-    reason: Optional[str] = None
+    # FIXED: keeps "too_broad" instead of overriding with None
+    reason: Optional[str] = Field(default=None)
 
     # 👉 Nouveau : est-ce qu'on a besoin d'une réponse utilisateur ?
     awaiting_user_input: bool = False
