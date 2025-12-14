@@ -178,13 +178,15 @@ class RootAgent(BaseAgent):
         # Check cache first (if SQL present). If hit, skip calling the Executor.
         exec_state = None
         sql_for_cache = final_intent.get("sql")
-        params_for_cache = final_intent.get("params")
         if sql_for_cache:
             try:
-                cached = bq_cache_get(sql_for_cache, params_for_cache)
+                logger.debug(f"[Root] Cache lookup for SQL: {sql_for_cache[:100]}")
+                cached = bq_cache_get(sql_for_cache)
                 if cached is not None:
-                    logger.info("[Root] CACHE HIT for query_hash")
+                    logger.info("[Root] ✓ CACHE HIT - Using cached result")
                     exec_state = cached
+                else:
+                    logger.debug("[Root] Cache lookup returned None (MISS)")
             except Exception:
                 logger.exception("Cache lookup failed — proceeding to executor")
 
@@ -200,7 +202,14 @@ class RootAgent(BaseAgent):
             # Only cache successful executor results (best-effort): store if exec_state non-empty
             try:
                 if sql_for_cache and exec_state:
-                    bq_cache_set(sql_for_cache, exec_state, params=params_for_cache)
+                    logger.debug(f"[Root] Attempting cache write for SQL: {sql_for_cache[:80]}")
+                    cache_ok = bq_cache_set(sql_for_cache, exec_state)
+                    if cache_ok:
+                        logger.info(f"[Root] ✓ Cache write successful for SQL: {sql_for_cache[:80]}")
+                    else:
+                        logger.warning(f"[Root] ✗ Cache write failed (returned False) for SQL: {sql_for_cache[:80]}")
+                else:
+                    logger.debug(f"[Root] Skipping cache write: sql_for_cache={bool(sql_for_cache)}, exec_state_empty={not bool(exec_state)}")
             except Exception:
                 logger.exception("Failed to write cache for query")
         # ---------- 4) Explainer ----------

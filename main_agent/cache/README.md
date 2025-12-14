@@ -9,8 +9,8 @@ This document describes the BigQuery-based caching plan and how the root pipelin
 
 ## Overview / Where to integrate
 
-- After the IntentAgent produces the final SQL (and normalized parameters), the RootAgent should:
-  1. Generate a deterministic cache key from the SQL + parameters.
+- After the IntentAgent produces the final SQL, the RootAgent should:
+  1. Generate a deterministic cache key from the normalized SQL.
   2. Check the BigQuery cache table for an entry under that key.
   3. If an unexpired cached result exists: deserialize and return it immediately (skip Executor).
   4. If not present: run the Executor, store the result in the BigQuery cache, then continue to the Explainer.
@@ -23,13 +23,12 @@ This document describes the BigQuery-based caching plan and how the root pipelin
 ## Key Scheme
 
 - Normalize SQL: remove redundant whitespace, canonicalize spacing, optionally lower-case keywords (apply with care).
-- Serialize parameters with `json.dumps(params, sort_keys=True)` and include them in the key input.
-- Hash: compute SHA256 of normalized SQL + serialized params → `query_hash`.
-- Key format (conceptual): `sha256(normalized_sql + '|' + json.dumps(params, sort_keys=True))`
+- Hash: compute SHA256 of the normalized SQL → `query_hash`.
+- Key format (conceptual): `sha256(normalize(sql))`
 
 Example pseudocode:
 ```
-key_input = normalize(sql) + '|' + json.dumps(params or {}, sort_keys=True)
+key_input = normalize(sql)
 query_hash = sha256(key_input)
 ```
 
@@ -77,12 +76,17 @@ CREATE TABLE IF NOT EXISTS `practicode-2025.cache.query_results` (
 
 ## Cache Module API (recommended)
 
-- `get(sql: str, params: dict|None = None) -> Optional[dict]`
+- `get(sql: str) -> Optional[dict]`
   - Returns the deserialized executor state (or `None` on miss).
-- `set(sql: str, result: dict, params: dict|None = None, ttl_seconds: int|None = None) -> bool`
+- `set(sql: str, result: dict, ttl_seconds: int|None = None) -> bool`
   - Saves the result and returns `True` on success.
-- `delete(sql: str, params: dict|None = None) -> bool` (optional)
+- `delete(sql: str) -> bool` (optional)
 - `cleanup_expired() -> int` (optional) — returns number of rows removed.
+
+Note: The implementation currently uses the normalized SQL text only to compute cache keys.
+`params` support was intentionally removed to match the current `IntentAgent` behavior
+which returns fully inlined, deterministic SQL. If you later switch to parameterized
+SQL (placeholders + separate params), update the cache module to include `params` in the key.
 
 ## Implementation Plan (phased)
 
@@ -100,9 +104,9 @@ BQ_CACHE_ENABLED=true
 - Reuse the existing BigQuery client in `main_agent/bq.py` if available, or instantiate `bigquery.Client(project="practicode-2025", location="EU")`.
 - Implement:
   - `_normalize_sql(sql: str) -> str`
-  - `_generate_cache_key(sql: str, params: dict|None) -> str` (SHA256)
-  - `get(sql, params)` which returns `exec_state` or `None` (also increment `hit_count`)
-  - `set(sql, result, params, ttl_seconds)` to insert/update the cache row
+  - `_generate_cache_key(sql: str) -> str` (SHA256)
+  - `get(sql)` which returns `exec_state` or `None` (also increment `hit_count`)
+  - `set(sql, result, ttl_seconds)` to insert/update the cache row
   - `_update_hit_count(query_hash, new_count)` internal helper
   - `cleanup_expired()` optional helper
 
@@ -112,30 +116,11 @@ Implementation notes:
 
 ### Phase 3 — RootAgent integration
 - Modify `main_agent/agent.py` to import the cache module.
-- After the IntentAgent produces the final SQL and before calling the Executor:
-  - `cached = bq_cache.get(sql, params)`
+ - After the IntentAgent produces the final SQL and before calling the Executor:
+  - `cached = bq_cache.get(sql)`
   - If `cached`: set `exec_state = cached` and skip the Executor.
-  - Else: run Executor; on success call `bq_cache.set(sql, exec_state, params=params)`.
+  - Else: run Executor; on success call `bq_cache.set(sql, exec_state)`.
 
-Pseudocode:
-```
-from main_agent.cache.bq_cache import bq_cache
-
-sql = final_intent.get("sql")
-params = final_intent.get("params")
-exec_state = None
-if sql:
-    cached = bq_cache.get(sql, params)
-    if cached:
-        logger.info("[Root] CACHE HIT")
-        exec_state = cached
-
-if exec_state is None:
-    c = self.executor_agent.run({"user_question": final_intent.get("question"), "sql": sql})
-    exec_state = c.get("state", {}) or {}
-    if exec_state and sql:
-        bq_cache.set(sql, exec_state, params=params)
-```
 
 ### Phase 4 — Tests & instrumentation
 - Add unit tests under `main_agent/tests/test_bq_cache.py`:
@@ -172,7 +157,3 @@ BQ_CACHE_ENABLED=true
 3. Integrate the cache check into `main_agent/agent.py`.
 4. Add tests and perform manual verification.
 
----
-File path: `main_agent/cache/README.md`
-
-If you want, I can implement `main_agent/cache/bq_cache.py` and the `main_agent/agent.py` integration next — tell me whether to proceed with code changes.

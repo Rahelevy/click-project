@@ -14,6 +14,8 @@ import hashlib
 import logging
 from typing import Any, Dict, Optional
 import datetime
+import decimal
+import re
 
 from google.cloud import bigquery
 
@@ -47,33 +49,87 @@ def _get_client() -> bigquery.Client:
 CLIENT = _get_client()
 
 
+def _json_default(o):
+    """Convert common non-JSON types to JSON-serializable values."""
+    if isinstance(o, (datetime.datetime, datetime.date, datetime.time)):
+        try:
+            return o.isoformat()
+        except Exception:
+            return str(o)
+    if isinstance(o, decimal.Decimal):
+        # preserve integer-y decimals as int when possible
+        try:
+            if o % 1 == 0:
+                return int(o)
+        except Exception:
+            pass
+        return float(o)
+    # fallback: stringify unknown types
+    return str(o)
+
+
+def _parse_iso_datetime(s: str) -> datetime.datetime | str:
+    """Try to parse ISO 8601 datetime string; return original string if parse fails."""
+    if not isinstance(s, str):
+        return s
+    # Simple ISO 8601 pattern: YYYY-MM-DDTHH:MM:SS[.ffffff][+HH:MM|Z]
+    if re.match(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}', s):
+        try:
+            # Python 3.7+ supports fromisoformat
+            return datetime.datetime.fromisoformat(s.replace('Z', '+00:00'))
+        except Exception:
+            return s
+    return s
+
+
+def _restore_datetimes(obj: Any) -> Any:
+    """Recursively walk a deserialized JSON object and restore datetime objects from ISO strings."""
+    if isinstance(obj, dict):
+        return {k: _restore_datetimes(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_restore_datetimes(item) for item in obj]
+    elif isinstance(obj, str):
+        return _parse_iso_datetime(obj)
+    return obj
+
+
 def _normalize_sql(sql: str) -> str:
     # simple normalization: collapse whitespace and trim
     return " ".join(sql.split()) if sql else ""
 
 
-def _generate_cache_key(sql: str, params: Optional[Dict[str, Any]] = None) -> str:
-    key_input = _normalize_sql(sql) + "|" + json.dumps(params or {}, sort_keys=True, separators=(",", ":"))
+def _generate_cache_key(sql: str) -> str:
+    """Generate a SHA256 cache key from the normalized SQL only.
+
+    Note: params were removed — cache key is computed from SQL text alone.
+    """
+    key_input = _normalize_sql(sql)
     return hashlib.sha256(key_input.encode("utf-8")).hexdigest()
 
 
 def _update_hit_count(query_hash: str) -> None:
     try:
+        # Use MERGE instead of UPDATE to avoid "rows in the streaming buffer" errors
+        # This approach is safe even if the row is very recently inserted
         q = f"""
-        UPDATE `{BQ_CACHE_TABLE_ID}`
-        SET hit_count = IFNULL(hit_count, 0) + 1,
+        MERGE INTO `{BQ_CACHE_TABLE_ID}` t
+        USING (SELECT @hash AS query_hash) s
+        ON t.query_hash = s.query_hash
+        WHEN MATCHED THEN
+          UPDATE SET 
+            hit_count = IFNULL(hit_count, 0) + 1,
             last_accessed = CURRENT_TIMESTAMP()
-        WHERE query_hash = @hash
         """
         job_config = bigquery.QueryJobConfig(
             query_parameters=[bigquery.ScalarQueryParameter("hash", "STRING", query_hash)]
         )
         CLIENT.query(q, job_config=job_config).result()
     except Exception:
-        logging.exception("Failed to update hit_count for cache key %s", query_hash)
+        # Log but don't fail - hit count is not critical for cache correctness
+        logging.debug("Could not update hit_count for cache key %s (non-critical)", query_hash)
 
 
-def get(sql: str, params: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+def get(sql: str) -> Optional[Dict[str, Any]]:
     """Return cached result_data (deserialized) for given SQL+params, or None on miss.
 
     This only returns rows that are not expired (expires_at is null or in the future).
@@ -81,7 +137,9 @@ def get(sql: str, params: Optional[Dict[str, Any]] = None) -> Optional[Dict[str,
     if not BQ_CACHE_ENABLED:
         return None
 
-    query_hash = _generate_cache_key(sql, params)
+    query_hash = _generate_cache_key(sql)
+    logging.debug(f"[Cache] Normalized SQL: {_normalize_sql(sql)[:80]}")
+    logging.debug(f"[Cache] Query hash: {query_hash[:16]}...")
     q = f"""
     SELECT query_hash, original_query, result_data, cached_at, ttl_seconds, expires_at, hit_count, last_accessed
     FROM `{BQ_CACHE_TABLE_ID}`
@@ -96,27 +154,30 @@ def get(sql: str, params: Optional[Dict[str, Any]] = None) -> Optional[Dict[str,
         rows = CLIENT.query(q, job_config=job_config).result()
         for row in rows:
             rd = getattr(row, "result_data", None)
-            # BigQuery JSON column may come back as native Python structures
+            # BigQuery JSON column returns as string, deserialize it
             if isinstance(rd, str):
                 try:
                     rd = json.loads(rd)
+                    # Restore datetime objects from ISO strings
+                    rd = _restore_datetimes(rd)
                 except Exception:
-                    # leave as-is if not JSON
-                    pass
-
+                    logging.exception("Failed to deserialize result_data from JSON")
+                    return None
+            
             # asynchronously update hit_count (best-effort)
             try:
                 _update_hit_count(query_hash)
             except Exception:
                 pass
 
+            logging.info(f"✓ Cache HIT: query_hash={query_hash[:16]}...")
             return rd
     except Exception:
         logging.exception("BigQuery cache get failed for key %s", query_hash)
-    return None
+    logging.debug(f"Cache MISS: query_hash={query_hash[:16]}...")
 
 
-def set(sql: str, result: Any, params: Optional[Dict[str, Any]] = None, ttl_seconds: Optional[int] = None) -> bool:
+def set(sql: str, result: Any, ttl_seconds: Optional[int] = None) -> bool:
     """Store result in the cache table. `result` must be JSON-serializable.
 
     Uses `insert_rows_json` which will insert a row. If a row with the same
@@ -127,7 +188,7 @@ def set(sql: str, result: Any, params: Optional[Dict[str, Any]] = None, ttl_seco
     if not BQ_CACHE_ENABLED:
         return False
 
-    query_hash = _generate_cache_key(sql, params)
+    query_hash = _generate_cache_key(sql)
     ttl = ttl_seconds if ttl_seconds is not None else BQ_CACHE_TTL_SECONDS
 
     expires_at_iso = None
@@ -135,11 +196,18 @@ def set(sql: str, result: Any, params: Optional[Dict[str, Any]] = None, ttl_seco
         expires_at = datetime.datetime.now(tz=datetime.timezone.utc) + datetime.timedelta(seconds=ttl)
         expires_at_iso = expires_at.isoformat()
 
+    # Serialize result to JSON string to ensure proper handling by BigQuery JSON column
+    try:
+        result_json_str = json.dumps(result, default=_json_default, ensure_ascii=False)
+    except Exception:
+        logging.exception("Failed to serialize result to JSON")
+        return False
+
     row = {
         "query_hash": query_hash,
         "original_query": _normalize_sql(sql),
-        # BigQuery client will convert Python dict/list to JSON for a JSON column
-        "result_data": result,
+        # Store as JSON string for JSON column type
+        "result_data": result_json_str,
         "ttl_seconds": ttl,
         "expires_at": expires_at_iso,
         "hit_count": 1,
@@ -151,16 +219,17 @@ def set(sql: str, result: Any, params: Optional[Dict[str, Any]] = None, ttl_seco
         if errors:
             logging.error("Errors inserting cache row: %s", errors)
             return False
+        logging.info(f"✓ Cache insert successful: query_hash={query_hash[:16]}...")
         return True
     except Exception:
         logging.exception("Failed to insert cache row for key %s", query_hash)
         return False
 
 
-def delete(sql: str, params: Optional[Dict[str, Any]] = None) -> bool:
+def delete(sql: str) -> bool:
     if not BQ_CACHE_ENABLED:
         return False
-    query_hash = _generate_cache_key(sql, params)
+    query_hash = _generate_cache_key(sql)
     q = f"""
     DELETE FROM `{BQ_CACHE_TABLE_ID}` WHERE query_hash = @hash
     """
