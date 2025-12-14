@@ -1,5 +1,8 @@
+<<<<<<< HEAD
 from datetime import date
 
+=======
+>>>>>>> feature/start-fresh
 import logging
 logger = logging.getLogger("intent")
 logger.debug("🔥 IntentAgent loaded")
@@ -121,31 +124,38 @@ class IntentAgent(BaseAgent):
             else:
                 user_question = getattr(state, "question", None) or str(state)
 
-        # Edge case: no question extracted  (A מטפל בזה לבד)
+        # Edge case: no question extracted
         if not user_question:
-            is_hebrew = self._is_hebrew(str(state))
             clean = {
                 "valid": False,
-                "awaiting_user_input": True,   # A כן מבקש ניסוח מחדש
+                "awaiting_user_input": True,
                 "missing_fields": ["question"],
+                "question_to_user": "לא קיבלתי שאלה. תוכלי לנסח שוב?",
                 "sql": None,
                 "reason": "missing_question",
                 "question": "",
             }
             return {
                 "state": clean,
-                "should_run_focus": False,     # לא שולחים ל-B
+                "should_run_focus": True,
                 "should_run_executor": False,
                 "should_run_explainer": False,
             }
 
         # Too broad / missing filters → send to Focus
         if self._looks_too_broad(user_question):
+            is_hebrew = self._is_hebrew(user_question)
+            question_to_user = (
+                "השאלה מעט רחבה. אפשר למקד – למשל לפי אפליקציה, מקור תנועה, תאריך או סוג פעולה?"
+                if is_hebrew else
+                "This request is too broad. Could you narrow it down by app, source, date, or event type?"
+            )
 
             clean = {
                 "valid": False,
-                "awaiting_user_input": False,   # A לא שואל; B ישאל
+                "awaiting_user_input": True,
                 "missing_fields": ["filter_needed"],
+                "question_to_user": question_to_user,
                 "sql": None,
                 "reason": "too_broad",
                 "question": user_question,
@@ -158,7 +168,7 @@ class IntentAgent(BaseAgent):
                 "should_run_explainer": False,
             }
 
-        # ---- BUILD YOUR FULL PROMPT (UPDATED TO REMOVE question_to_user) ----
+        # ---- BUILD UPDATED PROMPT (ONLY CHANGE) ----
         prompt = f"""
 You are Agent A – the Intent Analyzer for a BigQuery dataset.
 
@@ -209,6 +219,7 @@ SMART MAPPINGS
 "engaged view(s)"               → is_engaged_view = TRUE
 "video views"                   → engagement_type = 'video_view'
 
+------------------------------------------------------------
 ENGAGEMENT TYPE RULES
 ------------------------------------------------------------
 In this dataset, the column engagement_type always has the same value:
@@ -253,22 +264,18 @@ DATE HANDLING RULES
   → Mark valid = true
 
 ✔ If date is invalid or in the future:
-  → Mark valid = false
-  → awaiting_user_input = false
-  → missing_fields should include "date"
-  → Do NOT ask the user directly (Agent B will ask)
+  → Ask user to clarify
 
 ------------------------------------------------------------
 DATE FORMAT RULE (MM-DD-YYYY)
 ------------------------------------------------------------
 If the user writes a date like "10-24-2025", always interpret it as:
-
   MM-DD-YYYY → Month-Day-Year
 
 So:
   "10-24-2025" → October 24, 2025
 
-Compare this against the *real current date*.
+Compare this against the real current date.
 
 ------------------------------------------------------------
 DATE FILTERING RULE (IMPORTANT — USE PARTITIONS!)
@@ -276,15 +283,17 @@ DATE FILTERING RULE (IMPORTANT — USE PARTITIONS!)
 The table practicode-2025.clicks_data_prac.encoded_clicks is
 partitioned by DATE(event_time). Therefore:
 
-YOU MUST ALWAYS FILTER DATES USING:
-
+- If the user provides a date or date range, you MUST filter using:
     DATE(event_time)
-
-and NEVER compare raw timestamps unless the user explicitly asks.
 
 Correct usage examples:
   DATE(event_time) = "2025-10-24"
   DATE(event_time) BETWEEN "2025-10-24" AND "2025-10-26"
+
+- If the user does NOT provide any date, do NOT invent one.
+  (Date filtering is optional, but must be correct when given.)
+
+NEVER compare raw timestamps unless the user explicitly asks for timestamp-level logic.
 
 ------------------------------------------------------------
 SQL GENERATION RULES
@@ -292,12 +301,14 @@ SQL GENERATION RULES
 1. ALWAYS use:
    `practicode-2025.clicks_data_prac.encoded_clicks`
 
-2. NEVER return all columns by default.
+2. NEVER invent filters or values.
 
-3. DO NOT generate SELECT event_time, hr, ...
-   unless user explicitly requests “all fields” or a non-aggregated list.
+3. If NOT aggregating (raw rows):
+   - You may SELECT the full row set (all fields listed below),
+     but only when the user explicitly asks for rows / list / all clicks / raw data.
 
-4. NEVER invent filters or values.
+4. If the user provides a date range,
+   ALWAYS use DATE(event_time) BETWEEN "<start-date>" AND "<end-date>".
 
 ------------------------------------------------------------
 APP_ID FORMAT RULES
@@ -305,52 +316,160 @@ APP_ID FORMAT RULES
 The dataset uses synthetic app IDs in the form "app_id_<number>"
 (e.g. "app_id_1", "app_id_2", "app_id_20").
 
-1) If the user provides an app id as a plain number, such as:
-   - "app id = 2"
-   - "app id 2"
-   - "app_id 3"
-   - "app 10"
-   - "appid=5"
-
-   YOU MUST convert it to the correct string format in SQL:
-
+1) If the user provides an app id as a plain number:
+   YOU MUST convert it to:
    app_id = "app_id_<number>"
 
+2) If the user provides an app id that is not numeric and does NOT start with "app_id_":
+   - DO NOT generate a SQL query.
+   - Ask the user to provide a valid app identifier in the "app_id_<number>" format.
+
 ------------------------------------------------------------
-MEDIA SOURCE / PARTNER / SITE ID RULES
+MEDIA SOURCE MAPPING RULES
 ------------------------------------------------------------
-Same as original rules:
-- media_source_<number>
-- partner_<number>
-- site_id_<number>
-Convert plain numbers accordingly.
+The dataset uses media sources in the format: media_source_<number>
+
+1) If the user provides a number:
+   YOU MUST convert it to:
+       media_source = "media_source_<number>"
+
+2) If the user provides a non-numeric media source that does not match media_source_<number>,
+   you MUST ask for clarification and NOT generate SQL.
+
+------------------------------------------------------------
+PARTNER FIELD RULES
+------------------------------------------------------------
+The dataset uses partner identifiers in the strict format:
+    partner_<number>
+
+1) If the user provides a number referring to partner:
+   YOU MUST convert it to:
+       partner = "partner_<number>"
+
+2) If the user provides a non-numeric partner not matching partner_<number>,
+   you MUST ask for clarification and NOT generate SQL.
+
+------------------------------------------------------------
+SITE ID RULES
+------------------------------------------------------------
+The dataset uses site identifiers in the strict format:
+    site_id_<number>
+
+1) If the user provides a number referring to a site:
+   YOU MUST convert it to:
+       site_id = "site_id_<number>"
+
+2) If the user does not provide a number for site_id when needed,
+   the query is NOT valid. Ask for clarification.
 
 ------------------------------------------------------------
 COUNT vs SUM RULES
 ------------------------------------------------------------
-(keep your original rules...)
+1) For "how many clicks / events / total clicks / כמה קליקים":
+   MUST use:
+       SUM(total_events)
+
+2) For "how many rows / entries / כמה שורות":
+   MUST use:
+       COUNT(*)
 
 ------------------------------------------------------------
-OUTPUT FORMAT (NO question_to_user)
+AGGREGATION DECISION (CRITICAL — NEW)
 ------------------------------------------------------------
-Return JSON ONLY matching AgentAOutput WITHOUT question_to_user.
+When valid=true, you must decide whether the user wants RAW rows
+or an AGGREGATED summary.
 
-If valid:
+RAW triggers (no aggregation_spec):
+- User explicitly asks for rows/list/raw data:
+  "show me all clicks", "list events", "give me the rows",
+  "תראי לי את כל הקליקים", "רשימה של קליקים", "נתונים גולמיים".
+
+AGGREGATION triggers (include aggregation_spec):
+- User asks for totals or summaries:
+  "how many", "count clicks", "total events", "sum of clicks",
+  "כמה", "סך הכל", "כמות קליקים".
+- User asks for breakdown/grouping:
+  "by partner", "by media source", "per app", "breakdown by X",
+  "לפי שותף", "לפי מקור", "פילוח לפי X".
+- User asks for top-N:
+  "top 5 partners", "best sources", "top media sources".
+- User asks for share/percent:
+  "percentage", "share", "distribution", "אחוזים", "חלק מתוך הכל".
+- User asks for trends over time:
+  "trend", "daily/weekly/monthly clicks", "התפלגות לאורך זמן".
+
+If AGGREGATION is needed:
+1) Generate BASE SQL with filters only (NO GROUP BY, NO SUM).
+2) Add "aggregation_spec" to the JSON output.
+
+aggregation_spec format:
+{{
+  "group_by": ["<one or more columns>"] or [],
+  "metric_alias": "clicks",
+  "top_n": <optional int>,
+  "add_percent": <optional true/false>,
+  "time_granularity": <optional "hour"|"day"|"month">
+}}
+
+Rules:
+- group_by columns must be from:
+  event_time, hr, is_engaged_view, is_retargeting,
+  media_source, partner, app_id, site_id
+- If user asks only for TOTAL (no breakdown), set group_by=[].
+- If user asks top N, set top_n=N.
+- If user asks percent/share, set add_percent=true.
+- If user asks time trend, group_by=["event_time"] and set time_granularity.
+
+------------------------------------------------------------
+WHEN TO ASK FOR CLARIFICATION
+------------------------------------------------------------
+CASE A – TOO BROAD  
+Hebrew:
+"השאלה מעט רחבה. אפשר לחדד או למקד – למשל לפי אפליקציה, מקור תנועה, תאריך או סוג פעולה?"
+English:
+"This request is a bit too broad. Could you narrow it down – for example by app, traffic source, date, or event type?"
+
+CASE B – UNSUPPORTED FIELD  
+Hebrew:
+"נראה שהתייחסת למידע שאין לנו עליו נתונים. אפשר לציין אפליקציה, מקור תנועה או טווח תאריכים?"
+English:
+"It seems you mentioned information we do not have data for. Could you specify something like an app, a traffic source, or a date range?"
+
+CASE C – AMBIGUOUS  
+Hebrew:
+"אני לא בטוח למה התכוונת. מה בדיוק תרצי לבדוק?"
+English:
+"I'm not fully sure what you mean. What exactly would you like to check?"
+
+CASE D – INVALID DATE (non-reversed)
+→ Ask user nicely for a correct date.
+
+------------------------------------------------------------
+CASE E – VALID QUERY
+------------------------------------------------------------
+If the query is valid and enough information exists,
+return JSON ONLY in this shape:
+
 {{
  "valid": true,
  "awaiting_user_input": false,
  "missing_fields": [],
- "sql": "<generated SQL>",
+ "question_to_user": null,
+ "sql": "<generated base SQL>",
+ "aggregation_spec": <optional object or null>,
  "reason": null,
  "question": "{user_question}"
 }}
 
-If NOT valid:
+If NOT valid, return:
+
 {{
  "valid": false,
- "awaiting_user_input": false,
+ "awaiting_user_input": true,
  "missing_fields": ["<short_reason_code>"],
+ "question_to_user": "<friendly explanation in the same language>",
  "sql": null,
+ "aggregation_spec": null,
  "reason": "<machine_reason_or_null>",
  "question": "{user_question}"
 }}
@@ -382,54 +501,22 @@ USER QUESTION:
         try:
             parsed = json.loads(content)
         except Exception:
+            is_hebrew = self._is_hebrew(user_question)
+            question_to_user = (
+                "לא הצלחתי להבין את הבקשה. תוכלי לחדד?"
+                if is_hebrew else
+                "I could not understand your request. Could you clarify?"
+            )
+
             parsed = {
                 "valid": False,
                 "reason": "model_non_json_response",
-                "awaiting_user_input": False,
+                "awaiting_user_input": True,
                 "missing_fields": ["clarification_needed"],
+                "question_to_user": question_to_user,
                 "sql": None,
                 "question": user_question,
             }
-
-        # -----------------------------
-        # ✅ ADDITION: numeric filter fix
-        # -----------------------------
-        def _fix_numeric_filters(sql: str) -> str:
-            if not sql:
-                return sql
-
-            # app_id = 2  -> app_id = "app_id_2"
-            sql = re.sub(
-                r'app_id\s*=\s*(\d+)',
-                r'app_id = "app_id_\1"',
-                sql
-            )
-
-            # media_source = 2 -> media_source = "media_source_2"
-            sql = re.sub(
-                r'media_source\s*=\s*(\d+)',
-                r'media_source = "media_source_\1"',
-                sql
-            )
-
-            # partner = 2 -> partner = "partner_2"
-            sql = re.sub(
-                r'partner\s*=\s*(\d+)',
-                r'partner = "partner_\1"',
-                sql
-            )
-
-            # site_id = 12 -> site_id = "site_id_12"
-            sql = re.sub(
-                r'site_id\s*=\s*(\d+)',
-                r'site_id = "site_id_\1"',
-                sql
-            )
-
-            return sql
-
-        if parsed.get("valid") and parsed.get("sql"):
-            parsed["sql"] = _fix_numeric_filters(parsed["sql"])
 
         # Validate against schema if possible
         try:
