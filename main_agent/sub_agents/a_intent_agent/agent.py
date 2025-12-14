@@ -1,8 +1,5 @@
-<<<<<<< HEAD
 from datetime import date
 
-=======
->>>>>>> feature/start-fresh
 import logging
 logger = logging.getLogger("intent")
 logger.debug("🔥 IntentAgent loaded")
