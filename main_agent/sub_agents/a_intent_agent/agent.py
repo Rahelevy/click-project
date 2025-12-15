@@ -1,5 +1,3 @@
-from datetime import date
-
 import logging
 logger = logging.getLogger("intent")
 logger.debug("🔥 IntentAgent loaded")
@@ -10,6 +8,7 @@ from google import genai
 import json
 import os
 import re
+from datetime import date  # ✅ ADDED (only for today's date anchor)
 
 from .schemas import AgentAOutput
 from dotenv import load_dotenv
@@ -105,6 +104,90 @@ class IntentAgent(BaseAgent):
 
         return False
 
+    # =========================
+    # NUMERIC FILTER FIXER (your addition)
+    # =========================
+    @staticmethod
+    def _fix_numeric_filters(sql: str) -> str:
+        if not sql:
+            return sql
+
+        # app_id = 2  -> app_id = "app_id_2"
+        sql = re.sub(
+            r'app_id\s*=\s*(\d+)',
+            r'app_id = "app_id_\1"',
+            sql
+        )
+
+        # media_source = 2 -> media_source = "media_source_2"
+        sql = re.sub(
+            r'media_source\s*=\s*(\d+)',
+            r'media_source = "media_source_\1"',
+            sql
+        )
+
+        # partner = 2 -> partner = "partner_2"
+        sql = re.sub(
+            r'partner\s*=\s*(\d+)',
+            r'partner = "partner_\1"',
+            sql
+        )
+
+        # site_id = 12 -> site_id = "site_id_12"
+        sql = re.sub(
+            r'site_id\s*=\s*(\d+)',
+            r'site_id = "site_id_\1"',
+            sql
+        )
+
+        return sql
+
+    # ✅ NEW =========================
+    # FORCE AGGREGATION WHEN USER ASKS "HOW MANY CLICKS"
+    # ✅ NEW =========================
+    @staticmethod
+    def _wants_total_clicks(question: str) -> bool:
+        if not question:
+            return False
+
+        q = question.lower()
+
+        heb = [
+            "כמה קליקים", "סך קליקים", "סה\"כ קליקים", "כמות קליקים", "סך הכל קליקים",
+            "כמה אירועים", "סך אירועים", "סה\"כ אירועים"
+        ]
+        eng = [
+            "how many clicks", "total clicks", "number of clicks",
+            "how many events", "total events", "sum of clicks", "sum of events"
+        ]
+
+        return any(p in question for p in heb) or any(p in q for p in eng)
+
+    # ✅ NEW
+    @staticmethod
+    def _rewrite_sql_to_sum_total_events(sql: str) -> str:
+        """
+        Turns:
+          SELECT <anything> FROM `table` WHERE <filters>
+        Into:
+          SELECT SUM(total_events) AS total_clicks FROM `table` WHERE <filters>
+
+        Keeps FROM/WHERE/... suffix as-is.
+        """
+        if not sql:
+            return sql
+
+        m = re.match(r"(?is)^\s*select\s+.*?\s+from\s+", sql)
+        if not m:
+            return sql
+
+        return re.sub(
+            r"(?is)^\s*select\s+.*?\s+from\s+",
+            "SELECT SUM(total_events) AS total_clicks FROM ",
+            sql,
+            count=1
+        )
+
     # =============================
     # MAIN RUN (YOUR ORIGINAL LOGIC)
     # =============================
@@ -121,31 +204,35 @@ class IntentAgent(BaseAgent):
             else:
                 user_question = getattr(state, "question", None) or str(state)
 
-        # Edge case: no question extracted  (A מטפל בזה לבד)
+
+        user_question = (user_question or "").strip()
+
+        # Edge case: no question extracted (A handles it directly)
+
         if not user_question:
-            is_hebrew = self._is_hebrew(str(state))
             clean = {
                 "valid": False,
-                "awaiting_user_input": True,   # A כן מבקש ניסוח מחדש
+                "awaiting_user_input": True,
                 "missing_fields": ["question"],
+                "question_to_user": None,
                 "sql": None,
                 "reason": "missing_question",
                 "question": "",
             }
             return {
                 "state": clean,
-                "should_run_focus": False,     # לא שולחים ל-B
+                "should_run_focus": False,
                 "should_run_executor": False,
                 "should_run_explainer": False,
             }
 
         # Too broad / missing filters → send to Focus
         if self._looks_too_broad(user_question):
-
             clean = {
                 "valid": False,
-                "awaiting_user_input": False,   # A לא שואל; B ישאל
+                "awaiting_user_input": False,
                 "missing_fields": ["filter_needed"],
+                "question_to_user": None,
                 "sql": None,
                 "reason": "too_broad",
                 "question": user_question,
@@ -158,7 +245,12 @@ class IntentAgent(BaseAgent):
                 "should_run_explainer": False,
             }
 
-        # ---- BUILD YOUR FULL PROMPT (UPDATED TO REMOVE question_to_user) ----
+
+        # ✅ ADDED: real "today" anchor for date validation (no behavior change)
+        today_str = date.today().isoformat()  # e.g. "2025-12-10"
+
+        # ---- BUILD YOUR FULL PROMPT (only addition is TODAY'S DATE block) ----
+
         prompt = f"""
 You are Agent A – the Intent Analyzer for a BigQuery dataset.
 
@@ -169,6 +261,11 @@ Respond in the same language the user used:
 - If the question is in Hebrew → respond in Hebrew.
 - If the question is in English → respond in English.
 Never switch the user's language.
+
+------------------------------------------------------------
+TODAY'S DATE (for validation)
+------------------------------------------------------------
+{today_str}
 
 ------------------------------------------------------------
 REAL TABLE — ALWAYS USE:
@@ -209,6 +306,7 @@ SMART MAPPINGS
 "engaged view(s)"               → is_engaged_view = TRUE
 "video views"                   → engagement_type = 'video_view'
 
+------------------------------------------------------------
 ENGAGEMENT TYPE RULES
 ------------------------------------------------------------
 In this dataset, the column engagement_type always has the same value:
@@ -253,6 +351,7 @@ DATE HANDLING RULES
   → Mark valid = true
 
 ✔ If date is invalid or in the future:
+
   → Mark valid = false
   → awaiting_user_input = false
   → missing_fields should include "date"
@@ -262,11 +361,11 @@ DATE HANDLING RULES
 DATE FORMAT RULE (MM-DD-YYYY)
 ------------------------------------------------------------
 If the user writes a date like "10-24-2025", always interpret it as:
-
   MM-DD-YYYY → Month-Day-Year
 
 So:
   "10-24-2025" → October 24, 2025
+
 
 Compare this against the *real current date*.
 
@@ -276,15 +375,35 @@ DATE FILTERING RULE (IMPORTANT — USE PARTITIONS!)
 The table practicode-2025.clicks_data_prac.encoded_clicks is
 partitioned by DATE(event_time). Therefore:
 
-YOU MUST ALWAYS FILTER DATES USING:
-
+- If the user provides a date or date range, you MUST filter using:
     DATE(event_time)
-
-and NEVER compare raw timestamps unless the user explicitly asks.
 
 Correct usage examples:
   DATE(event_time) = "2025-10-24"
   DATE(event_time) BETWEEN "2025-10-24" AND "2025-10-26"
+
+
+
+NEVER compare raw timestamps unless the user explicitly asks for timestamp-level logic.
+
+If the user specifies a single date like "10-24-2025",
+interpret it as MM-DD-YYYY → October 24, 2025, and generate:
+
+  DATE(event_time) = "2025-10-24"
+
+If the user specifies a date range:
+  - Normalize and reorder them if needed.
+  - Always use:
+
+      DATE(event_time) BETWEEN "<start-date>" AND "<end-date>"
+
+NEVER generate:
+  event_time >= "<date> 00:00:00 UTC"
+  event_time < "<next day> 00:00:00 UTC"
+
+because this bypasses the date partition, causes a full table scan,
+and severely slows down BigQuery. Always use DATE(event_time) filters.
+
 
 ------------------------------------------------------------
 SQL GENERATION RULES
@@ -292,65 +411,159 @@ SQL GENERATION RULES
 1. ALWAYS use:
    `practicode-2025.clicks_data_prac.encoded_clicks`
 
-2. NEVER return all columns by default.
+2. NEVER invent filters or values.
 
-3. DO NOT generate SELECT event_time, hr, ...
-   unless user explicitly requests “all fields” or a non-aggregated list.
+3. NEVER return all columns by default.
+   Allowed:
+   - SELECT SUM(total_events)
+   - SELECT aggregated data
 
-4. NEVER invent filters or values.
 
-------------------------------------------------------------
+4. If NOT aggregating (raw rows):
+   - You may SELECT the full row set (all fields listed below),
+     but only when the user explicitly asks for rows / list / all clicks / raw data.
+
+
+5. If the user provides a date range,
+   ALWAYS use DATE(event_time) BETWEEN "<start-date>" AND "<end-date>".
+
+6. NEVER invent filters or values.
+
 APP_ID FORMAT RULES
 ------------------------------------------------------------
 The dataset uses synthetic app IDs in the form "app_id_<number>"
 (e.g. "app_id_1", "app_id_2", "app_id_20").
 
-1) If the user provides an app id as a plain number, such as:
-   - "app id = 2"
-   - "app id 2"
-   - "app_id 3"
-   - "app 10"
-   - "appid=5"
-
-   YOU MUST convert it to the correct string format in SQL:
-
+1) If the user provides an app id as a plain number:
+   YOU MUST convert it to:
    app_id = "app_id_<number>"
 
+
+2) If the user provides an app id that is not numeric and does NOT start with "app_id_",
+   such as "test.app", "com.app.test", or any other package-like string:
+
+   - DO NOT generate a SQL query.
+   - Treat the question as invalid.
+   - Return valid=false, awaiting_user_input=false,
+     missing_fields including "app_id", and sql=null.
+
 ------------------------------------------------------------
-MEDIA SOURCE / PARTNER / SITE ID RULES
+AGGREGATION RULES — CRITICAL
 ------------------------------------------------------------
-Same as original rules:
-- media_source_<number>
-- partner_<number>
-- site_id_<number>
-Convert plain numbers accordingly.
+You must NOT use SUM(), COUNT(), or any aggregation function
+unless the user explicitly asks for an aggregated metric.
+
+(keep your original triggers...)
+
 
 ------------------------------------------------------------
 COUNT vs SUM RULES
 ------------------------------------------------------------
-(keep your original rules...)
+1) For "how many clicks / events / total clicks / כמה קליקים":
+   MUST use:
+       SUM(total_events)
+
+2) For "how many rows / entries / כמה שורות":
+   MUST use:
+       COUNT(*)
 
 ------------------------------------------------------------
-OUTPUT FORMAT (NO question_to_user)
+AGGREGATION DECISION (CRITICAL — NEW)
 ------------------------------------------------------------
-Return JSON ONLY matching AgentAOutput WITHOUT question_to_user.
+When valid=true, you must decide whether the user wants RAW rows
+or an AGGREGATED summary.
 
-If valid:
+RAW triggers (no aggregation_spec):
+- User explicitly asks for rows/list/raw data:
+  "show me all clicks", "list events", "give me the rows",
+  "תראי לי את כל הקליקים", "רשימה של קליקים", "נתונים גולמיים".
+
+AGGREGATION triggers (include aggregation_spec):
+- User asks for totals or summaries:
+  "how many", "count clicks", "total events", "sum of clicks",
+  "כמה", "סך הכל", "כמות קליקים".
+- User asks for breakdown/grouping:
+  "by partner", "by media source", "per app", "breakdown by X",
+  "לפי שותף", "לפי מקור", "פילוח לפי X".
+- User asks for top-N:
+  "top 5 partners", "best sources", "top media sources".
+- User asks for share/percent:
+  "percentage", "share", "distribution", "אחוזים", "חלק מתוך הכל".
+- User asks for trends over time:
+  "trend", "daily/weekly/monthly clicks", "התפלגות לאורך זמן".
+
+If AGGREGATION is needed:
+1) Generate BASE SQL with filters only (NO GROUP BY, NO SUM).
+2) Add "aggregation_spec" to the JSON output.
+
+aggregation_spec format:
+{{
+  "group_by": ["<one or more columns>"] or [],
+  "metric_alias": "clicks",
+  "top_n": <optional int>,
+  "add_percent": <optional true/false>,
+  "time_granularity": <optional "hour"|"day"|"month">
+}}
+
+Rules:
+- group_by columns must be from:
+  event_time, hr, is_engaged_view, is_retargeting,
+  media_source, partner, app_id, site_id
+- If user asks only for TOTAL (no breakdown), set group_by=[].
+- If user asks top N, set top_n=N.
+- If user asks percent/share, set add_percent=true.
+- If user asks time trend, group_by=["event_time"] and set time_granularity.
+
+------------------------------------------------------------
+WHEN TO ASK FOR CLARIFICATION
+------------------------------------------------------------
+CASE A – TOO BROAD  
+Hebrew:
+"השאלה מעט רחבה. אפשר לחדד או למקד – למשל לפי אפליקציה, מקור תנועה, תאריך או סוג פעולה?"
+English:
+"This request is a bit too broad. Could you narrow it down – for example by app, traffic source, date, or event type?"
+
+CASE B – UNSUPPORTED FIELD  
+Hebrew:
+"נראה שהתייחסת למידע שאין לנו עליו נתונים. אפשר לציין אפליקציה, מקור תנועה או טווח תאריכים?"
+English:
+"It seems you mentioned information we do not have data for. Could you specify something like an app, a traffic source, or a date range?"
+
+CASE C – AMBIGUOUS  
+Hebrew:
+"אני לא בטוח למה התכוונת. מה בדיוק תרצי לבדוק?"
+English:
+"I'm not fully sure what you mean. What exactly would you like to check?"
+
+CASE D – INVALID DATE (non-reversed)
+→ Ask user nicely for a correct date.
+
+------------------------------------------------------------
+CASE E – VALID QUERY
+------------------------------------------------------------
+If the query is valid and enough information exists,
+return JSON ONLY in this shape:
+
 {{
  "valid": true,
  "awaiting_user_input": false,
  "missing_fields": [],
- "sql": "<generated SQL>",
+ "question_to_user": null,
+ "sql": "<generated base SQL>",
+ "aggregation_spec": <optional object or null>,
  "reason": null,
  "question": "{user_question}"
 }}
 
-If NOT valid:
+If NOT valid, return:
+
 {{
  "valid": false,
  "awaiting_user_input": false,
  "missing_fields": ["<short_reason_code>"],
+ "question_to_user": null,
  "sql": null,
+ "aggregation_spec": null,
  "reason": "<machine_reason_or_null>",
  "question": "{user_question}"
 }}
@@ -382,54 +595,25 @@ USER QUESTION:
         try:
             parsed = json.loads(content)
         except Exception:
+
+            # A לא שואל את המשתמש. רק מסמן שחסר מיקוד/הבהרה כדי ש-B ישאל.
             parsed = {
                 "valid": False,
                 "reason": "model_non_json_response",
-                "awaiting_user_input": False,
+                "awaiting_user_input": False,   # חשוב: לא לעצור את הזרימה פה
                 "missing_fields": ["clarification_needed"],
+                "question_to_user": None,
                 "sql": None,
                 "question": user_question,
             }
 
-        # -----------------------------
-        # ✅ ADDITION: numeric filter fix
-        # -----------------------------
-        def _fix_numeric_filters(sql: str) -> str:
-            if not sql:
-                return sql
-
-            # app_id = 2  -> app_id = "app_id_2"
-            sql = re.sub(
-                r'app_id\s*=\s*(\d+)',
-                r'app_id = "app_id_\1"',
-                sql
-            )
-
-            # media_source = 2 -> media_source = "media_source_2"
-            sql = re.sub(
-                r'media_source\s*=\s*(\d+)',
-                r'media_source = "media_source_\1"',
-                sql
-            )
-
-            # partner = 2 -> partner = "partner_2"
-            sql = re.sub(
-                r'partner\s*=\s*(\d+)',
-                r'partner = "partner_\1"',
-                sql
-            )
-
-            # site_id = 12 -> site_id = "site_id_12"
-            sql = re.sub(
-                r'site_id\s*=\s*(\d+)',
-                r'site_id = "site_id_\1"',
-                sql
-            )
-
-            return sql
-
+        # ✅ ADDED: fix numeric filters after JSON if valid
         if parsed.get("valid") and parsed.get("sql"):
-            parsed["sql"] = _fix_numeric_filters(parsed["sql"])
+            parsed["sql"] = self._fix_numeric_filters(parsed["sql"])
+
+        # ✅ NEW: force SUM(total_events) when the user asks "how many clicks/events"
+        if parsed.get("valid") and parsed.get("sql") and self._wants_total_clicks(user_question):
+            parsed["sql"] = self._rewrite_sql_to_sum_total_events(parsed["sql"])
 
         # Validate against schema if possible
         try:
@@ -438,10 +622,11 @@ USER QUESTION:
             clean_state = parsed
 
         logger.debug(f"[IntentAgent] Final clean_state = {clean_state}")
-
+        
+        is_valid = bool(clean_state.get("valid"))
         return {
             "state": clean_state,
             "should_run_focus": not clean_state.get("valid", False),
-            "should_run_executor": clean_state.get("valid", False),
+            "should_run_executor": is_valid,
             "should_run_explainer": False,
         }

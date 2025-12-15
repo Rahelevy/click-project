@@ -1,3 +1,132 @@
+# import logging
+# logger = logging.getLogger("executor")
+# logger.debug("🔥 ExecutorAgent loaded")
+
+# from typing import Any, Dict, List
+# from google.adk.agents import BaseAgent
+# from google.cloud import bigquery
+
+# from .schemas import AgentCOutput, IncomingResult
+
+
+# def safe_dump(obj):
+#     """Safe logging helper that avoids recursion problems."""
+#     try:
+#         if hasattr(obj, "model_dump"):
+#             return obj.model_dump()
+#         return obj
+#     except Exception:
+#         return str(obj)
+
+
+# class ExecutorAgent(BaseAgent):
+#     model_config = {"arbitrary_types_allowed": True, "extra": "allow"}
+
+#     def __repr__(self):
+#         return f"ExecutorAgent(name={self.name})"
+
+#     def __init__(self):
+#         super().__init__(name="executor_agent")
+#         self._bq_client: bigquery.Client | None = None
+
+#     # -----------------------------------------------------
+#     # BigQuery client (single shared client, fixed region)
+#     # -----------------------------------------------------
+#     def _get_bq_client(self) -> bigquery.Client:
+#         """
+#         Create a single shared BigQuery client for the agent,
+#         pinned to the practicode-2025 project and EU location.
+#         """
+#         if self._bq_client is None:
+#             try:
+#                 self._bq_client = bigquery.Client(
+#                     project="practicode-2025",
+#                     location="EU",
+#                 )
+#                 logger.debug("[Executor] BigQuery client created with EU location")
+#             except Exception as e:
+#                 logger.error(f"[Executor] Could not create BigQuery client: {e}")
+#                 raise
+
+#         return self._bq_client
+
+#     # -----------------------------------------------------
+#     # Main Agent Logic
+#     # -----------------------------------------------------
+#     def run(self, state: Dict[str, Any]):
+#         logger.debug(f"[Executor] START state = {safe_dump(state)}")
+
+#         user_question = state.get("user_question", "")
+#         sql = state.get("sql", "")
+
+#         # ---------------------------------------------
+#         # SQL Validation
+#         # ---------------------------------------------
+#         if not sql or "select" not in sql.lower():
+#             output = AgentCOutput(
+#                 user_question=user_question,
+#                 incoming=IncomingResult(
+#                     status="error",
+#                     description="SQL validation failed: empty or invalid SQL.",
+#                 ),
+#                 db_result=None,
+#             ).model_dump()
+
+#             return {"state": output, "should_run_explainer": True}
+
+#         logger.debug(f"[Executor] Running SQL:\n{sql}")
+
+#         # ---------------------------------------------
+#         # BigQuery Execution
+#         # ---------------------------------------------
+#         try:
+#             client = self._get_bq_client()
+
+#             # Submit query (explicit EU location for safety)
+#             query_job = client.query(sql, location="EU")
+#             logger.debug("[Executor] BigQuery job submitted... waiting for result.")
+
+#             # Single blocking call – consume the entire iterator ONCE
+#             rows_iter = query_job.result(timeout=120)
+#             rows: List[dict] = [dict(row.items()) for row in rows_iter]
+
+#             logger.debug(f"[Executor] BigQuery returned {len(rows)} rows")
+
+#             # No rows ⇒ still success, just empty result
+#             if len(rows) == 0:
+#                 desc = "Query returned no rows."
+#             else:
+#                 desc = f"Returned {len(rows)} rows."
+
+#             output = AgentCOutput(
+#                 user_question=user_question,
+#                 incoming=IncomingResult(
+#                     status="success",
+#                     description=desc,
+#                 ),
+#                 db_result=rows,
+#             ).model_dump()
+
+#             return {"state": output, "should_run_explainer": True}
+
+#         except Exception as e:
+#             logger.exception("[Executor] BigQuery execution error")
+
+#             output = AgentCOutput(
+#                 user_question=user_question,
+#                 incoming=IncomingResult(
+#                     status="error",
+#                     description=f"Query execution failed: {e}",
+#                 ),
+#                 db_result=None,
+#             ).model_dump()
+
+#             return {"state": output, "should_run_explainer": True}
+
+
+# executor_agent = ExecutorAgent()
+
+
 import logging
 logger = logging.getLogger("executor")
 logger.debug("🔥 ExecutorAgent loaded")
@@ -7,6 +136,9 @@ from google.adk.agents import BaseAgent
 from google.cloud import bigquery
 
 from .schemas import AgentCOutput, IncomingResult
+
+# NEW: aggregation imports
+from .aggregations import build_aggregated_sql, AggregationSpec
 
 
 def safe_dump(obj):
@@ -60,7 +192,7 @@ class ExecutorAgent(BaseAgent):
         sql = state.get("sql", "")
 
         # ---------------------------------------------
-        # SQL Validation
+        # SQL Validation (basic)
         # ---------------------------------------------
         if not sql or "select" not in sql.lower():
             output = AgentCOutput(
@@ -73,6 +205,29 @@ class ExecutorAgent(BaseAgent):
             ).model_dump()
 
             return {"state": output, "should_run_explainer": True}
+
+        # ---------------------------------------------
+        # NEW: Apply aggregation if spec exists
+        # ---------------------------------------------
+        agg_spec_dict = state.get("aggregation_spec")
+        if agg_spec_dict:
+            try:
+                # Expecting dict like:
+                # {"group_by": ["partner"], "metric_alias": "clicks", "top_n": 10, ...}
+                spec = AggregationSpec(**agg_spec_dict)
+                sql = build_aggregated_sql(sql, spec)
+                logger.debug(f"[Executor] Aggregated SQL:\n{sql}")
+            except Exception as e:
+                output = AgentCOutput(
+                    user_question=user_question,
+                    incoming=IncomingResult(
+                        status="error",
+                        description=f"Aggregation failed: {e}",
+                    ),
+                    db_result=None,
+                ).model_dump()
+
+                return {"state": output, "should_run_explainer": True}
 
         logger.debug(f"[Executor] Running SQL:\n{sql}")
 
@@ -91,6 +246,8 @@ class ExecutorAgent(BaseAgent):
             rows: List[dict] = [dict(row.items()) for row in rows_iter]
 
             logger.debug(f"[Executor] BigQuery returned {len(rows)} rows")
+            if rows:
+                logger.debug(f"[Executor] First row sample: {rows[0]}")
 
             # No rows ⇒ still success, just empty result
             if len(rows) == 0:
