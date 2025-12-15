@@ -40,6 +40,23 @@ class IntentAgent(BaseAgent):
         return any("א" <= ch <= "ת" for ch in (text or ""))
 
     @staticmethod
+    def _add_limit_to_sql(sql: str, limit: int = 1000) -> str:
+        """
+        Appends a LIMIT clause to the SQL if not already present.
+        """
+        if not sql:
+            return sql
+        sql_lower = sql.lower()
+        if "limit" in sql_lower:
+            return sql
+        # Add LIMIT before trailing semicolon if present
+        sql = sql.rstrip()
+        if sql.endswith(';'):
+            sql = sql[:-1]
+            return f"{sql} LIMIT {limit};"
+        return f"{sql} LIMIT {limit}"
+
+    @staticmethod
     def _has_filter_hint(text: str) -> bool:
         if not text:
             return False
@@ -614,6 +631,10 @@ USER QUESTION:
         # ✅ NEW: force SUM(total_events) when the user asks "how many clicks/events"
         if parsed.get("valid") and parsed.get("sql") and self._wants_total_clicks(user_question):
             parsed["sql"] = self._rewrite_sql_to_sum_total_events(parsed["sql"])
+
+        # ✅ NEW: Add LIMIT to prevent buffer allocation errors in BigQuery
+        if parsed.get("valid") and parsed.get("sql"):
+            parsed["sql"] = self._add_limit_to_sql(parsed["sql"])
 
         # Validate against schema if possible
         try:

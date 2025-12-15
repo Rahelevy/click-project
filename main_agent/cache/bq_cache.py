@@ -164,6 +164,13 @@ def get(sql: str) -> Optional[Dict[str, Any]]:
                     logging.exception("Failed to deserialize result_data from JSON")
                     return None
             
+            # Skip cached errors - always re-execute failed queries
+            if isinstance(rd, dict):
+                incoming = rd.get('incoming', {})
+                if isinstance(incoming, dict) and incoming.get('status') == 'error':
+                    logging.info(f"Cache HIT but result is ERROR - skipping cache: query_hash={query_hash[:16]}...")
+                    return None
+            
             # asynchronously update hit_count (best-effort)
             try:
                 _update_hit_count(query_hash)

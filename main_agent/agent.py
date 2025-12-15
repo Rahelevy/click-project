@@ -214,17 +214,21 @@ class RootAgent(BaseAgent):
                 logger.exception("Failed to write cache for query")
         # ---------- 4) Explainer ----------
         # Explainer expects ExplanationInput pydantic. build it defensively.
+        logger.debug(f"[Root] exec_state keys: {exec_state.keys() if isinstance(exec_state, dict) else 'not a dict'}")
+        logger.debug(f"[Root] exec_state type: {type(exec_state)}")
         try:
             incoming = exec_state.get("incoming", {})
+            logger.debug(f"[Root] incoming type: {type(incoming)}, value: {incoming}")
             explain_input = ExplanationInput(
                 user_question=exec_state.get("user_question") or executor_input.get("user_question"),
                 incoming=ExecutorResult(
-                    status=incoming.get("status"),
-                    description=incoming.get("description"),
+                    status=incoming.get("status") if isinstance(incoming, dict) else incoming.status,
+                    description=incoming.get("description") if isinstance(incoming, dict) else incoming.description,
                 ),
                 db_result=exec_state.get("db_result"),
             )
-        except Exception:
+        except Exception as e:
+            logger.exception(f"[Root] Failed to build ExplanationInput: {e}")
             # last-resort: pass a simple dict to explainer_agent.run
             explain_input = {
                 "user_question": exec_state.get("user_question") or executor_input.get("user_question"),
@@ -233,8 +237,8 @@ class RootAgent(BaseAgent):
             }
         try:
             d = self.explainer_agent.run(explain_input)
-        except Exception:
-            logger.exception("ExplainerAgent.run failed; attempting with dict input.")
+        except Exception as e:
+            logger.exception(f"[Root] ExplainerAgent.run failed: {e}; attempting with dict input.")
             d = self.explainer_agent.run(explain_input if isinstance(explain_input, dict) else explain_input.model_dump())
         explain_state = d.get("state", {}) or {}
         logger.debug(f"[Root] Explainer output = {explain_state}")
