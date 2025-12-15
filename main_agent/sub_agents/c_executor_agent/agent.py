@@ -182,6 +182,20 @@ class ExecutorAgent(BaseAgent):
 
         return self._bq_client
 
+    def _add_limit_if_missing(self, sql: str, limit: int = 50000) -> str:
+        """
+        Add a LIMIT clause to SQL if one doesn't already exist.
+        This prevents BigQuery buffer allocation errors on large result sets.
+        """
+        sql_upper = sql.upper().strip()
+        
+        # Check if LIMIT already exists
+        if "LIMIT" in sql_upper:
+            return sql
+        
+        # Add LIMIT clause
+        return f"{sql.rstrip(';')} LIMIT {limit}"
+
     # -----------------------------------------------------
     # Main Agent Logic
     # -----------------------------------------------------
@@ -229,7 +243,9 @@ class ExecutorAgent(BaseAgent):
 
                 return {"state": output, "should_run_explainer": True}
 
-        logger.debug(f"[Executor] Running SQL:\n{sql}")
+        # Add LIMIT to prevent buffer overflow at BigQuery level
+        sql_with_limit = self._add_limit_if_missing(sql, limit=50000)
+        logger.debug(f"[Executor] Running SQL:\n{sql_with_limit}")
 
         # ---------------------------------------------
         # BigQuery Execution
@@ -238,12 +254,34 @@ class ExecutorAgent(BaseAgent):
             client = self._get_bq_client()
 
             # Submit query (explicit EU location for safety)
-            query_job = client.query(sql, location="EU")
+            query_job = client.query(sql_with_limit, location="EU")
             logger.debug("[Executor] BigQuery job submitted... waiting for result.")
 
-            # Single blocking call – consume the entire iterator ONCE
-            rows_iter = query_job.result(timeout=120)
-            rows: List[dict] = [dict(row.items()) for row in rows_iter]
+            # Set a reasonable row limit to prevent memory overflow
+            MAX_ROWS = 10000
+            rows_iter = query_job.result(timeout=120, max_results=MAX_ROWS)
+            
+            # Load rows in batches to avoid memory issues
+            rows: List[dict] = []
+            row_count = 0
+            truncated = False
+            
+            try:
+                for row in rows_iter:
+                    rows.append(dict(row.items()))
+                    row_count += 1
+                    if row_count >= MAX_ROWS:
+                        truncated = True
+                        logger.warning(f"[Executor] Result truncated at {MAX_ROWS} rows")
+                        break
+            except Exception as iter_error:
+                logger.error(f"[Executor] Error during row iteration: {iter_error}")
+                # If we have some rows, continue with what we have
+                if rows:
+                    logger.info(f"[Executor] Continuing with {len(rows)} rows collected before error")
+                    truncated = True
+                else:
+                    raise
 
             logger.debug(f"[Executor] BigQuery returned {len(rows)} rows")
             if rows:
@@ -252,6 +290,8 @@ class ExecutorAgent(BaseAgent):
             # No rows ⇒ still success, just empty result
             if len(rows) == 0:
                 desc = "Query returned no rows."
+            elif truncated:
+                desc = f"Returned {len(rows)} rows (result limited to first {MAX_ROWS} rows due to size)."
             else:
                 desc = f"Returned {len(rows)} rows."
 

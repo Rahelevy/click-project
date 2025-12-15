@@ -156,7 +156,20 @@ class ExplainerAgent(BaseAgent):
         # Gemini client (google-genai 1.52.0)
         object.__setattr__(self, "client", genai.Client(api_key=api_key))
 
-    def run(self, state: ExplanationInput):
+    def run(self, state):
+        # Handle both Pydantic model and dict inputs
+        if isinstance(state, dict):
+            user_question = state.get("user_question", "")
+            incoming = state.get("incoming", {})
+            if isinstance(incoming, dict):
+                incoming_json = json.dumps(incoming)
+            else:
+                # incoming is a Pydantic model
+                incoming_json = incoming.model_dump_json()
+        else:
+            # state is ExplanationInput Pydantic model
+            user_question = state.user_question
+            incoming_json = state.incoming.model_dump_json()
 
         # Build instruction + input
         prompt = f"""
@@ -165,12 +178,12 @@ class ExplainerAgent(BaseAgent):
 --------------------
 USER QUESTION:
 --------------------
-{state.user_question}
+{user_question}
 
 --------------------
 EXECUTOR RESULT:
 --------------------
-{state.incoming.model_dump_json()}
+{incoming_json}
 """
 
         # Call Gemini
