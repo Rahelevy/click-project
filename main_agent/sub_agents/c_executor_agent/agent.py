@@ -246,6 +246,8 @@ class ExecutorAgent(BaseAgent):
             rows: List[dict] = [dict(row.items()) for row in rows_iter]
 
             logger.debug(f"[Executor] BigQuery returned {len(rows)} rows")
+            if rows:
+                logger.debug(f"[Executor] First row sample: {rows[0]}")
 
             # No rows ⇒ still success, just empty result
             if len(rows) == 0:
