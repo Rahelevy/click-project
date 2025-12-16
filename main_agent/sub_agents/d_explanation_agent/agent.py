@@ -208,8 +208,10 @@ EXECUTOR RESULT:
             raise ValueError(f"Agent D returned invalid JSON:\n{content}")
 
         # Build ExplanationOutput state
+        # Handle both dict and pydantic model inputs
+        default_status = state.incoming.status if hasattr(state, 'incoming') else state.get('incoming', {}).get('status', 'unknown')
         output = ExplanationOutput(
-            status=parsed.get("status", state.incoming.status),
+            status=parsed.get("status", default_status),
             description=parsed.get("description", "")
         )
 

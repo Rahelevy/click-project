@@ -18,6 +18,7 @@ import decimal
 import re
 
 from google.cloud import bigquery
+import sqlparse
 
 try:
     # prefer existing BQ client wrapper in the project
@@ -29,7 +30,7 @@ except Exception:
 BQ_CACHE_TABLE_ID = os.getenv(
     "BQ_CACHE_TABLE_ID", "practicode-2025.cache.query_results"
 )
-BQ_CACHE_TTL_SECONDS = int(os.getenv("BQ_CACHE_TTL_SECONDS", "3600"))
+BQ_CACHE_TTL_SECONDS = int(os.getenv("BQ_CACHE_TTL_SECONDS", "2592000"))  # 30 days
 BQ_CACHE_ENABLED = os.getenv("BQ_CACHE_ENABLED", "true").lower() in (
     "1",
     "true",
@@ -94,8 +95,85 @@ def _restore_datetimes(obj: Any) -> Any:
 
 
 def _normalize_sql(sql: str) -> str:
-    # simple normalization: collapse whitespace and trim
-    return " ".join(sql.split()) if sql else ""
+    """Normalize SQL query to handle semantically equivalent queries.
+    
+    This function:
+    1. Formats SQL consistently (keywords uppercase, consistent spacing)
+    2. Normalizes quotes (standardizes to single quotes)
+    3. Sorts WHERE clause conditions alphabetically for consistent ordering
+    
+    Returns:
+        Normalized SQL string for cache key generation
+    """
+    if not sql:
+        return ""
+    
+    try:
+        # Step 1: Format SQL with consistent formatting using sqlparse
+        formatted = sqlparse.format(
+            sql,
+            keyword_case='upper',
+            strip_comments=True,
+            reindent=False,
+            use_space_around_operators=True
+        )
+        
+        # Step 2: Normalize quotes - replace double quotes with single quotes for string literals
+        # Match strings enclosed in double quotes (not backticks)
+        def normalize_quotes(match):
+            content = match.group(1)
+            # Escape any single quotes that might be inside
+            content = content.replace("'", "''")
+            return f"'{content}'"
+        
+        # Replace "string" with 'string' but preserve `identifiers`
+        formatted = re.sub(r'"([^"]*)"', normalize_quotes, formatted)
+        
+        # Step 3: Sort WHERE clause conditions alphabetically
+        # Use regex to find WHERE clause content and the following keyword
+        def sort_where_conditions(match):
+            where_keyword = match.group(1)  # WHERE (with proper case)
+            where_content = match.group(2)  # Everything between WHERE and next keyword
+            following_keyword = match.group(3)  # The following keyword (e.g., LIMIT, GROUP BY)
+            
+            where_clause = where_content.strip()
+            
+            # Split by AND (case-insensitive) to get individual conditions
+            conditions = re.split(r'\s+AND\s+', where_clause, flags=re.IGNORECASE)
+            
+            if len(conditions) > 1:
+                # Normalize each condition: strip whitespace and collapse internal spaces
+                normalized_conditions = []
+                for cond in conditions:
+                    normalized_cond = ' '.join(cond.strip().split())
+                    normalized_conditions.append(normalized_cond)
+                
+                # Sort conditions alphabetically
+                normalized_conditions.sort()
+                
+                # Reconstruct with sorted conditions
+                new_where_clause = ' AND '.join(normalized_conditions)
+                return f" {where_keyword} {new_where_clause} {following_keyword}"
+            else:
+                # If no AND conditions, return as-is
+                return match.group(0)
+        
+        # Pattern: Find WHERE clause followed by next major keyword or end of string
+        # Group 1: WHERE keyword
+        # Group 2: Conditions between WHERE and next keyword
+        # Group 3: Next keyword or empty if end of string
+        pattern = r'(\bWHERE\b)\s+(.*?)\s+(\b(?:GROUP|ORDER|HAVING|LIMIT|OFFSET|UNION|INTERSECT|EXCEPT)\b|$)'
+        formatted = re.sub(pattern, sort_where_conditions, formatted, flags=re.IGNORECASE | re.DOTALL)
+        
+        # Step 4: Final cleanup - collapse multiple spaces into one and trim
+        formatted = ' '.join(formatted.split()).strip()
+        
+        return formatted
+        
+    except Exception as e:
+        # If normalization fails, fall back to simple whitespace normalization
+        logging.warning(f"SQL normalization failed, using simple normalization: {e}")
+        return " ".join(sql.split()) if sql else ""
 
 
 def _generate_cache_key(sql: str) -> str:
@@ -199,6 +277,13 @@ def set(sql: str, result: Any, ttl_seconds: Optional[int] = None) -> bool:
     ttl = ttl_seconds if ttl_seconds is not None else BQ_CACHE_TTL_SECONDS
 
     expires_at_iso = None
+    # Skip caching error results - they shouldn't be cached
+    if isinstance(result, dict):
+        incoming = result.get('incoming', {})
+        if isinstance(incoming, dict) and incoming.get('status') == 'error':
+            logging.info(f"Skipping cache write for error result: query_hash={query_hash[:16]}...")
+            return False
+
     if ttl:
         expires_at = datetime.datetime.now(tz=datetime.timezone.utc) + datetime.timedelta(seconds=ttl)
         expires_at_iso = expires_at.isoformat()
@@ -215,6 +300,7 @@ def set(sql: str, result: Any, ttl_seconds: Optional[int] = None) -> bool:
         "original_query": _normalize_sql(sql),
         # Store as JSON string for JSON column type
         "result_data": result_json_str,
+        "cached_at": datetime.datetime.now(tz=datetime.timezone.utc).isoformat(),
         "ttl_seconds": ttl,
         "expires_at": expires_at_iso,
         "hit_count": 1,
