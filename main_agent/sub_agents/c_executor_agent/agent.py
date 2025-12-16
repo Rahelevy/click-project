@@ -259,7 +259,7 @@ class ExecutorAgent(BaseAgent):
 
             # Set a reasonable row limit to prevent memory overflow
             MAX_ROWS = 10000
-            rows_iter = query_job.result(timeout=120, max_results=MAX_ROWS)
+            rows_iter = query_job.result(timeout=600, max_results=MAX_ROWS)
             
             # Load rows in batches to avoid memory issues
             rows: List[dict] = []
