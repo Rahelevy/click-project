@@ -9,11 +9,20 @@ import json
 import os
 import re
 from datetime import date  # ✅ ADDED (only for today's date anchor)
+from datetime import datetime
 
 from .schemas import AgentAOutput
 from dotenv import load_dotenv
 
-load_dotenv()  # <-- FORCE LOAD .env
+# Load .env from main_agent/.env explicitly (fallback to default search)
+_env_path = os.path.join(os.path.dirname(__file__), "..", ".env")
+try:
+    if os.path.exists(_env_path):
+        load_dotenv(_env_path)
+    else:
+        load_dotenv()
+except Exception:
+    load_dotenv()
 
 
 class IntentAgent(BaseAgent):
@@ -38,6 +47,57 @@ class IntentAgent(BaseAgent):
     @staticmethod
     def _is_hebrew(text: str) -> bool:
         return any("א" <= ch <= "ת" for ch in (text or ""))
+
+    @staticmethod
+    def _normalize_dates_in_text(text: str) -> str:
+        """
+        Normalize common date tokens in the text to ISO yyyy-mm-dd.
+        Supports:
+        - dd-mm-yyyy, dd/mm/yyyy, dd.mm.yyyy (first part > 12 → treat as day)
+        - mm-dd-yyyy (US) when first part <= 12
+        """
+        if not text:
+            return text
+
+        def _norm(m: re.Match) -> str:
+            a = int(m.group(1))
+            b = int(m.group(2))
+            y = int(m.group(3))
+            # decide format: if a > 12 assume dd-mm-yyyy, else mm-dd-yyyy
+            if a > 12:
+                day, month = a, b
+            else:
+                month, day = a, b
+            try:
+                dt = datetime(y, month, day)
+                return dt.strftime("%Y-%m-%d")
+            except Exception:
+                # if invalid date, keep original token
+                return m.group(0)
+
+        pattern = re.compile(r"\b(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})\b")
+        return pattern.sub(_norm, text)
+
+    @staticmethod
+    def _extract_app_id(text: str) -> str | None:
+        if not text:
+            return None
+        m = re.search(r"\bapp[_ ]?id[_ ]?(\d+)\b", text, flags=re.IGNORECASE)
+        if m:
+            return f"app_id_{m.group(1)}"
+        m = re.search(r"\bapp_id_(\d+)\b", text, flags=re.IGNORECASE)
+        if m:
+            return f"app_id_{m.group(1)}"
+        return None
+
+    @staticmethod
+    def _extract_single_iso_date(text: str) -> str | None:
+        if not text:
+            return None
+        m = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", text)
+        if m:
+            return m.group(1)
+        return None
 
     @staticmethod
     def _add_limit_to_sql(sql: str, limit: int = 1000) -> str:
@@ -70,7 +130,7 @@ class IntentAgent(BaseAgent):
             "site id", "site_id", "publisher",
             "date", "day", "hour", "time",
             "retargeting", "re-engaged", "installed before",
-            "click", "view"
+             "view"
         ]
 
         heb_hints = [
@@ -223,6 +283,67 @@ class IntentAgent(BaseAgent):
 
 
         user_question = (user_question or "").strip()
+        # Normalize dates to ISO to reduce ambiguity (e.g., 24-10-2025 → 2025-10-24)
+        user_question = self._normalize_dates_in_text(user_question)
+
+        # Deterministic minimal SQL: if at least one field (app_id and/or date) exists, build SQL without LLM.
+        app_id_val = self._extract_app_id(user_question)
+        date_val = self._extract_single_iso_date(user_question)
+        if app_id_val or date_val:
+            where_clauses = []
+            if app_id_val:
+                where_clauses.append(f"app_id = \"{app_id_val}\"")
+            if date_val:
+                where_clauses.append(f"DATE(event_time) = \"{date_val}\"")
+            where_sql = " AND ".join(where_clauses) if where_clauses else "TRUE"
+            base_sql = (
+                "SELECT event_time, hr, media_source, partner, app_id, site_id, "
+                "is_retargeting, is_engaged_view, total_events "
+                "FROM `practicode-2025.clicks_data_prac.encoded_clicks` "
+                f"WHERE {where_sql}"
+            )
+            base_sql = self._add_limit_to_sql(base_sql)
+
+            clean_state = {
+                "valid": True,
+                "awaiting_user_input": False,
+                "missing_fields": [],
+                "question_to_user": None,
+                "sql": base_sql,
+                "aggregation_spec": None,
+                "reason": None,
+                "question": user_question,
+            }
+            logger.info(f"[IntentAgent] Deterministic SQL (no LLM) = {clean_state['sql']}")
+            return {
+                "state": clean_state,
+                "should_run_focus": False,
+                "should_run_executor": True,
+                "should_run_explainer": False,
+            }
+
+
+
+        # ✅ NEW: normalize "app id 20" / "appid 20" / "app_id 20" into "app_id_20"
+        m = re.search(r"\bapp(?:_?id)?\s*(\d+)\b", user_question, flags=re.IGNORECASE)
+        if m:
+            n = m.group(1)
+            user_question = re.sub(
+                r"\bapp(?:_?id)?\s*\d+\b",
+                f"app_id_{n}",
+                user_question,
+                flags=re.IGNORECASE
+            )
+        elif re.fullmatch(r"\d+", user_question):
+            user_question = f"app_id_{user_question}"
+
+        # ✅ ADDED: real "today" anchor for date validation (no behavior change)
+        today_str = date.today().isoformat()
+
+
+
+
+
 
         # Edge case: no question extracted (A handles it directly)
 
@@ -591,10 +712,10 @@ USER QUESTION:
 {user_question}
 """
 
-        # MODEL CALL
+        # MODEL CALL (Gemini)
         response = self.client.models.generate_content(
             model="gemini-2.5-flash",
-            contents=prompt
+            contents=prompt,
         )
 
         content = (response.text or "").strip()
@@ -610,7 +731,7 @@ USER QUESTION:
 
         # JSON PARSE fallback (non-JSON model output)
         try:
-            parsed = json.loads(content)
+            parsed = json.loads(content)    
         except Exception:
 
             # A לא שואל את המשתמש. רק מסמן שחסר מיקוד/הבהרה כדי ש-B ישאל.

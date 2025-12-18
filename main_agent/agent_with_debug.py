@@ -71,49 +71,13 @@ class RootAgent(BaseAgent):
         logger.debug(f"[Root] start run_pipeline, user_content={getattr(ctx, 'user_content', None)}")
         logger.debug(f"[Root] session_state keys = {list(session_state.keys())}")
 
-        # Combine previous context with the current user message to reduce back-and-forth
-        def _extract_text_from_ctx(_ctx: InvocationContext) -> str:
-            try:
-                return getattr(_ctx.user_content.parts[0], "text", "") or ""
-            except Exception:
-                return str(getattr(_ctx, "user_content", ""))
-
-        current_msg = _extract_text_from_ctx(ctx).strip()
-        prev_q_candidates = [
-            session_state.get("question"),
-            session_state.get("user_question"),
-            session_state.get("original_question"),
-            session_state.get("refined_question"),
-        ]
-        base_prev_q = next((q for q in prev_q_candidates if isinstance(q, str) and q.strip()), "")
-        combined_q = current_msg
-        if base_prev_q and current_msg and current_msg not in base_prev_q:
-            combined_q = f"{base_prev_q.strip()}\n{current_msg.strip()}"
-            logger.debug(f"[Root] Using combined question for analysis: {combined_q}")
-
         # Initialize debug trace
         debug_trace = []
         debug_trace.append("User Input Received")
 
         # ---------- 1) Intent Agent (first pass) ----------
         try:
-            # Prefer running Intent with combined question if available
-            ctx_for_a = ctx
-            if combined_q and combined_q != current_msg:
-                try:
-                    ctx_for_a = InvocationContext(user_content=Part(text=combined_q), session=ctx.session)
-                except Exception:
-                    class _FakePart:
-                        def __init__(self, text):
-                            self.text = text
-
-                    class _FakeContent:
-                        def __init__(self, text):
-                            self.parts = [_FakePart(text)]
-
-                    ctx_for_a = type("FakeCtx", (), {"user_content": _FakeContent(combined_q), "session": ctx.session})()
-
-            a1 = self.intent_agent.run(ctx_for_a)
+            a1 = self.intent_agent.run(ctx)
         except Exception:
             logger.exception("IntentAgent.run failed on InvocationContext, attempting fallback with question string.")
             try:
@@ -130,12 +94,10 @@ class RootAgent(BaseAgent):
         if intent_state.get("awaiting_user_input"):
             msg = self._msg_from_intent(intent_state)
             debug_trace.append("Stopped: Waiting for User Input (Intent Agent)")
-            state_with_trace = dict(intent_state)
-            state_with_trace["_debug_trace"] = debug_trace
             return {
                 "stage": "awaiting_user_input",
-                "answer": msg,
-                "state": state_with_trace,
+                "answer": msg + self._format_debug_trace(debug_trace),
+                "state": intent_state,
             }
 
         should_run_focus = a1.get("should_run_focus", not intent_state.get("valid", False))
@@ -161,12 +123,10 @@ class RootAgent(BaseAgent):
                 q = focus_state.get("question_to_user") or \
                     ("אפשר לחדד את הבקשה?" if any("א" <= ch <= "ת" for ch in (final_intent.get("question") or "")) else
                      "Can you clarify your question?")
-                state_with_trace = dict(focus_state)
-                state_with_trace["_debug_trace"] = debug_trace
                 return {
                     "stage": "awaiting_user_input",
-                    "answer": q,
-                    "state": state_with_trace,
+                    "answer": q + self._format_debug_trace(debug_trace),
+                    "state": focus_state,
                 }
 
             # If focus provided refined question -> call IntentAgent again
@@ -201,12 +161,10 @@ class RootAgent(BaseAgent):
                 if intent2_state.get("awaiting_user_input"):
                     msg = self._msg_from_intent(intent2_state)
                     debug_trace.append("Stopped: Waiting for User Input (Intent Agent Round 2)")
-                    state_with_trace = dict(intent2_state)
-                    state_with_trace["_debug_trace"] = debug_trace
                     return {
                         "stage": "awaiting_user_input",
-                        "answer": msg,
-                        "state": state_with_trace,
+                        "answer": msg + self._format_debug_trace(debug_trace),
+                        "state": intent2_state,
                     }
                 final_intent = intent2_state
                 should_run_executor = a2.get("should_run_executor", final_intent.get("valid", False))
@@ -224,12 +182,10 @@ class RootAgent(BaseAgent):
                     if is_hebrew else
                     "It seems we're missing details to run the query. Could you narrow down by app, source or date range?"
                 )
-                state_with_trace = dict(final_intent)
-                state_with_trace["_debug_trace"] = debug_trace
                 return {
                     "stage": "awaiting_user_input",
-                    "answer": ask,
-                    "state": state_with_trace,
+                    "answer": ask + self._format_debug_trace(debug_trace),
+                    "state": final_intent,
                 }
 
         executor_input = {
@@ -318,12 +274,10 @@ class RootAgent(BaseAgent):
         
         answer_text = explain_state.get("description", "") if isinstance(explain_state, dict) else str(explain_state)
         
-        state_with_trace = dict(explain_state)
-        state_with_trace["_debug_trace"] = debug_trace
         return {
             "stage": "done",
-            "answer": answer_text,
-            "state": state_with_trace,
+            "answer": answer_text + self._format_debug_trace(debug_trace),
+            "state": explain_state,
         }
     # -----------------------------------------------------
     # ADK Async Wrapper
