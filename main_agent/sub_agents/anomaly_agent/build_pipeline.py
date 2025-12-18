@@ -18,12 +18,8 @@ def run_sql_file(filename):
 
 def run_pipeline():
     sql_files = [
-        # "hourly_metrics.sql",
-        # "hourly_media_metrics.sql",
-        # "hourly_anomalies.sql",
         # "media_source_hourly_agg.sql",
         "media_source_anomalies.sql",
-        "final_anomalies.sql",
     ]
 
     for file in sql_files:

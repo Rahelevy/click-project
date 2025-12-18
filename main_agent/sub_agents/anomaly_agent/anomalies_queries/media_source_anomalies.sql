@@ -2,28 +2,32 @@ CREATE OR REPLACE TABLE `practicode-2025.clicks_data_prac.media_source_anomalies
 
 WITH base AS (
   SELECT
-    day_date,
-    hour_of_day,
-    media_source,
+    day_date,   
+    hour_of_day,           
+    media_source,         
     total_clicks AS actual_events
   FROM `practicode-2025.clicks_data_prac.media_source_hourly_agg`
 ),
 
+-- חישוב חלון של 6 שעות אחורה
 rolling AS (
   SELECT
     *,
+    -- כמה שורות קודמות יש (כדי לוודא שיש 6 שעות מלאות)
     COUNT(*) OVER (
       PARTITION BY media_source
       ORDER BY day_date, hour_of_day
       ROWS BETWEEN 6 PRECEDING AND 1 PRECEDING
     ) AS rows_back,
 
+    -- ממוצע האירועים ב־6 השעות הקודמות
     AVG(actual_events) OVER (
       PARTITION BY media_source
       ORDER BY day_date, hour_of_day
       ROWS BETWEEN 6 PRECEDING AND 1 PRECEDING
     ) AS avg_last_6h,
 
+    -- סטיית תקן של 6 השעות הקודמות
     STDDEV(actual_events) OVER (
       PARTITION BY media_source
       ORDER BY day_date, hour_of_day
@@ -32,44 +36,56 @@ rolling AS (
   FROM base
 ),
 
--- keep only rows where we have exactly 6 prior hours available
+-- שמירה רק על שעות שיש להן בדיוק 6 שעות היסטוריות מלאות
 rolling_valid AS (
   SELECT *
   FROM rolling
-  WHERE rows_back = 6
-    AND avg_last_6h IS NOT NULL
-    AND std_last_6h IS NOT NULL
+  WHERE rows_back = 6        
+    AND avg_last_6h IS NOT NULL 
+    AND std_last_6h IS NOT NULL  
 ),
 
+-- חישוב z-score ושמירה רק של כאלה שהערך בפועל גבוה מהממוצע
 rolling_scored AS (
   SELECT
     *,
-    (actual_events - avg_last_6h) / NULLIF(std_last_6h, 0) AS zRolling
+    (actual_events - avg_last_6h) / NULLIF(std_last_6h, 0) AS zRolling -- חישוב Z-Score
   FROM rolling_valid
-  WHERE actual_events > avg_last_6h  -- only positive anomalies
+  WHERE actual_events > avg_last_6h  
 ),
 
+-- שמירה של רשומות שבהן ה־Z גבוה במיוחד (5+ סטיות תקן)
 strong_candidates AS (
-  SELECT *
+  SELECT 
+    *, 
+    avg_last_6h AS expected_events 
   FROM rolling_scored
-  WHERE zRolling > 5
+  WHERE zRolling > 5   
 ),
 
+-- הוספת יחס פי-כמה וסינון נוסף לפי יחס
 final_candidates AS (
   SELECT
-    day_date,
-    hour_of_day,
-    media_source,
-    actual_events,
-    ROUND(avg_last_6h) AS expected_events,
-    (actual_events - avg_last_6h) AS absolute_gap
+    day_date,                        
+    hour_of_day,                
+    media_source,            
+    actual_events,            
+    expected_events,             
+    (actual_events - expected_events) AS absolute_gap, 
+    actual_events / expected_events AS ratio   
   FROM strong_candidates
+  WHERE actual_events / expected_events >= 3  
 )
 
+-- בחירה סופית: מחזיר רק אנומליה אחת לכל מקור מדיה
 SELECT *
 FROM final_candidates
-ORDER BY absolute_gap DESC
-LIMIT 5;
+QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY media_source         
+    ORDER BY absolute_gap DESC     
+) = 1
+ORDER BY absolute_gap DESC       
+LIMIT 5;           
 
 
 
