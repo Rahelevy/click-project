@@ -245,10 +245,23 @@ class RootAgent(BaseAgent):
         # Convert Pydantic -> dict if needed
         if hasattr(explain_state, "model_dump"):
             explain_state = explain_state.model_dump()
+        
+        # Build answer with chart/table if available
+        description = explain_state.get("description", "") if isinstance(explain_state, dict) else str(explain_state)
+        render_type = explain_state.get("render_type") if isinstance(explain_state, dict) else None
+        
+        # Format answer based on render type
+        if render_type == "chart" and explain_state.get("chart_image"):
+            # Display rendered PNG image
+            answer = f"{description}\n\n{explain_state.get('chart_image')}"
+        elif render_type == "table" and explain_state.get("table_markdown"):
+            answer = f"{description}\n\n{explain_state.get('table_markdown')}"
+        else:
+            answer = description
+        
         return {
             "stage": "done",
-            "answer": explain_state.get("description", "") if isinstance(explain_state, dict) else str(explain_state),
-            "answer": explain_state.get("description", "") if isinstance(explain_state, dict) else str(explain_state),
+            "answer": answer,
             "state": explain_state,
         }
     # -----------------------------------------------------
