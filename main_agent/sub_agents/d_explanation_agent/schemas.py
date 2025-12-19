@@ -10,7 +10,8 @@ class ExecutorResult(BaseModel):
 class ExplanationInput(BaseModel):
     user_question: str            # השאלה המקורית של המשתמש
     incoming: ExecutorResult      # בדיוק מה שמגיע מסוכן C
-    db_result: Optional[list] = None  # הנתונים בפועל מה-DB
+    db_result: Optional[Any] = None  # הנתונים בפועל (רשימת שורות)
+    sql: Optional[str] = None     # SQL query for debugging
 
 
 class ExplanationOutput(BaseModel):

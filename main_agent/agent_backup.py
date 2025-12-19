@@ -55,14 +55,7 @@ class RootAgent(BaseAgent):
 
         # fallback כללי
         return "חסרים פרטים כדי להמשיך. תוכלי לחדד?" if is_hebrew else \
-               "We're missing details to continue. Could you clarify?"
-
-    @staticmethod
-    def _format_debug_trace(trace_list):
-        """Format debug trace as markdown list"""
-        if not trace_list:
-            return ""
-        return "\n\n---\n**Debug Trace:**\n" + "\n".join(f"{i+1}. {t}" for i, t in enumerate(trace_list))
+               "We’re missing details to continue. Could you clarify?"
 
     # -----------------------------------------------------
     # Main Pipeline (synchronous helper used by async wrapper)
@@ -71,49 +64,9 @@ class RootAgent(BaseAgent):
         logger.debug(f"[Root] start run_pipeline, user_content={getattr(ctx, 'user_content', None)}")
         logger.debug(f"[Root] session_state keys = {list(session_state.keys())}")
 
-        # Combine previous context with the current user message to reduce back-and-forth
-        def _extract_text_from_ctx(_ctx: InvocationContext) -> str:
-            try:
-                return getattr(_ctx.user_content.parts[0], "text", "") or ""
-            except Exception:
-                return str(getattr(_ctx, "user_content", ""))
-
-        current_msg = _extract_text_from_ctx(ctx).strip()
-        prev_q_candidates = [
-            session_state.get("question"),
-            session_state.get("user_question"),
-            session_state.get("original_question"),
-            session_state.get("refined_question"),
-        ]
-        base_prev_q = next((q for q in prev_q_candidates if isinstance(q, str) and q.strip()), "")
-        combined_q = current_msg
-        if base_prev_q and current_msg and current_msg not in base_prev_q:
-            combined_q = f"{base_prev_q.strip()}\n{current_msg.strip()}"
-            logger.debug(f"[Root] Using combined question for analysis: {combined_q}")
-
-        # Initialize debug trace
-        debug_trace = []
-        debug_trace.append("User Input Received")
-
         # ---------- 1) Intent Agent (first pass) ----------
         try:
-            # Prefer running Intent with combined question if available
-            ctx_for_a = ctx
-            if combined_q and combined_q != current_msg:
-                try:
-                    ctx_for_a = InvocationContext(user_content=Part(text=combined_q), session=ctx.session)
-                except Exception:
-                    class _FakePart:
-                        def __init__(self, text):
-                            self.text = text
-
-                    class _FakeContent:
-                        def __init__(self, text):
-                            self.parts = [_FakePart(text)]
-
-                    ctx_for_a = type("FakeCtx", (), {"user_content": _FakeContent(combined_q), "session": ctx.session})()
-
-            a1 = self.intent_agent.run(ctx_for_a)
+            a1 = self.intent_agent.run(ctx)
         except Exception:
             logger.exception("IntentAgent.run failed on InvocationContext, attempting fallback with question string.")
             try:
@@ -124,18 +77,14 @@ class RootAgent(BaseAgent):
 
         intent_state = a1.get("state", {}) or {}
         logger.debug(f"[Root] Intent-1 output = {intent_state}")
-        debug_trace.append(f"Intent Agent Round 1: valid={intent_state.get('valid', False)}")
 
         # אם A מבקש קלט משתמש (בעיקר empty question) — עונים מיד, בלי B
         if intent_state.get("awaiting_user_input"):
             msg = self._msg_from_intent(intent_state)
-            debug_trace.append("Stopped: Waiting for User Input (Intent Agent)")
-            state_with_trace = dict(intent_state)
-            state_with_trace["_debug_trace"] = debug_trace
             return {
                 "stage": "awaiting_user_input",
                 "answer": msg,
-                "state": state_with_trace,
+                "state": intent_state,
             }
 
         should_run_focus = a1.get("should_run_focus", not intent_state.get("valid", False))
@@ -145,7 +94,6 @@ class RootAgent(BaseAgent):
         # ---------- 2) Focus Agent (if needed) ----------
         if should_run_focus:
             logger.debug("[Root] Running FocusAgent")
-            debug_trace.append("Focus Agent: Clarifying question")
             try:
                 b = self.focus_agent.run(intent_state)
             except Exception:
@@ -157,23 +105,19 @@ class RootAgent(BaseAgent):
 
             # Focus asks the user
             if focus_state.get("awaiting_user_input"):
-                debug_trace.append("Stopped: Waiting for User Input (Focus Agent)")
                 q = focus_state.get("question_to_user") or \
                     ("אפשר לחדד את הבקשה?" if any("א" <= ch <= "ת" for ch in (final_intent.get("question") or "")) else
                      "Can you clarify your question?")
-                state_with_trace = dict(focus_state)
-                state_with_trace["_debug_trace"] = debug_trace
                 return {
                     "stage": "awaiting_user_input",
                     "answer": q,
-                    "state": state_with_trace,
+                    "state": focus_state,
                 }
 
             # If focus provided refined question -> call IntentAgent again
             if focus_state.get("refined_question"):
                 refined_q = focus_state["refined_question"]
                 logger.debug(f"[Root] Intent-2 with refined question = {refined_q}")
-                debug_trace.append(f"Intent Agent Round 2: Refined question = '{refined_q}'")
 
                 try:
                     ctx2 = InvocationContext(user_content=Part(text=refined_q), session=ctx.session)
@@ -197,16 +141,12 @@ class RootAgent(BaseAgent):
 
                 intent2_state = a2.get("state", {}) or {}
                 logger.debug(f"[Root] Intent-2 output = {intent2_state}")
-                debug_trace.append(f"Intent Agent Round 2: valid={intent2_state.get('valid', False)}")
                 if intent2_state.get("awaiting_user_input"):
                     msg = self._msg_from_intent(intent2_state)
-                    debug_trace.append("Stopped: Waiting for User Input (Intent Agent Round 2)")
-                    state_with_trace = dict(intent2_state)
-                    state_with_trace["_debug_trace"] = debug_trace
                     return {
                         "stage": "awaiting_user_input",
                         "answer": msg,
-                        "state": state_with_trace,
+                        "state": intent2_state,
                     }
                 final_intent = intent2_state
                 should_run_executor = a2.get("should_run_executor", final_intent.get("valid", False))
@@ -217,19 +157,16 @@ class RootAgent(BaseAgent):
         if not should_run_executor:
             if not final_intent.get("valid"):
                 logger.debug("[Root] No executor run possible — missing info.")
-                debug_trace.append("Stopped: Executor Skipped (Missing info)")
                 is_hebrew = any("א" <= ch <= "ת" for ch in (final_intent.get("question") or ""))
                 ask = (
                     "נראה שחסרים פרטים כדי להריץ את השאילתה. אפשר למקד לפי אפליקציה, מקור או טווח תאריכים?"
                     if is_hebrew else
                     "It seems we're missing details to run the query. Could you narrow down by app, source or date range?"
                 )
-                state_with_trace = dict(final_intent)
-                state_with_trace["_debug_trace"] = debug_trace
                 return {
                     "stage": "awaiting_user_input",
                     "answer": ask,
-                    "state": state_with_trace,
+                    "state": final_intent,
                 }
 
         executor_input = {
@@ -237,7 +174,6 @@ class RootAgent(BaseAgent):
             "sql": final_intent.get("sql"),
         }
         logger.debug(f"[Root] Executor input = {executor_input}")
-        debug_trace.append("Executor: Running SQL query")
 
         # Check cache first (if SQL present). If hit, skip calling the Executor.
         exec_state = None
@@ -248,7 +184,6 @@ class RootAgent(BaseAgent):
                 cached = bq_cache_get(sql_for_cache)
                 if cached is not None:
                     logger.info("[Root] ✓ CACHE HIT - Using cached result")
-                    debug_trace.append("Cache Hit: Using cached result")
                     exec_state = cached
                 else:
                     logger.debug("[Root] Cache lookup returned None (MISS)")
@@ -263,7 +198,6 @@ class RootAgent(BaseAgent):
                 c = self.executor_agent.run(user_question=executor_input.get("user_question"), sql=executor_input.get("sql"))
             exec_state = c.get("state", {}) or {}
             logger.debug(f"[Root] Executor output = {exec_state}")
-            debug_trace.append("Executor: Query completed")
 
             # Only cache successful executor results (best-effort): store if exec_state non-empty
             try:
@@ -280,7 +214,6 @@ class RootAgent(BaseAgent):
                 logger.exception("Failed to write cache for query")
         # ---------- 4) Explainer ----------
         # Explainer expects ExplanationInput pydantic. build it defensively.
-        debug_trace.append("Explainer: Generating friendly response")
         logger.debug(f"[Root] exec_state keys: {exec_state.keys() if isinstance(exec_state, dict) else 'not a dict'}")
         logger.debug(f"[Root] exec_state type: {type(exec_state)}")
         try:
@@ -293,7 +226,6 @@ class RootAgent(BaseAgent):
                     description=incoming.get("description") if isinstance(incoming, dict) else incoming.description,
                 ),
                 db_result=exec_state.get("db_result"),
-                sql=final_intent.get("sql"),
             )
         except Exception as e:
             logger.exception(f"[Root] Failed to build ExplanationInput: {e}")
@@ -302,7 +234,6 @@ class RootAgent(BaseAgent):
                 "user_question": exec_state.get("user_question") or executor_input.get("user_question"),
                 "incoming": exec_state.get("incoming"),
                 "db_result": exec_state.get("db_result"),
-                "sql": final_intent.get("sql"),
             }
         try:
             d = self.explainer_agent.run(explain_input)
@@ -311,27 +242,13 @@ class RootAgent(BaseAgent):
             d = self.explainer_agent.run(explain_input if isinstance(explain_input, dict) else explain_input.model_dump())
         explain_state = d.get("state", {}) or {}
         logger.debug(f"[Root] Explainer output = {explain_state}")
-        debug_trace.append("Pipeline Complete")
         # Convert Pydantic -> dict if needed
         if hasattr(explain_state, "model_dump"):
             explain_state = explain_state.model_dump()
-        
-        # Build answer with chart/table if available
-        description = explain_state.get("description", "") if isinstance(explain_state, dict) else str(explain_state)
-        render_type = explain_state.get("render_type") if isinstance(explain_state, dict) else None
-        
-        # Format answer based on render type
-        if render_type == "chart" and explain_state.get("chart_image"):
-            # Display rendered PNG image
-            answer = f"{description}\n\n{explain_state.get('chart_image')}"
-        elif render_type == "table" and explain_state.get("table_markdown"):
-            answer = f"{description}\n\n{explain_state.get('table_markdown')}"
-        else:
-            answer = description
-        
         return {
             "stage": "done",
-            "answer": answer,
+            "answer": explain_state.get("description", "") if isinstance(explain_state, dict) else str(explain_state),
+            "answer": explain_state.get("description", "") if isinstance(explain_state, dict) else str(explain_state),
             "state": explain_state,
         }
     # -----------------------------------------------------

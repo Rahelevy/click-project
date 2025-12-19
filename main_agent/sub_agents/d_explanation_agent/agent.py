@@ -2,6 +2,7 @@ from google.adk.agents import BaseAgent
 from google import genai
 import json
 import os
+from dotenv import load_dotenv
 
 from .schemas import ExplanationInput, ExplanationOutput
 from .chart_generator import rows_to_echarts_options, auto_chart_type, chart_options_to_png_base64
@@ -52,25 +53,35 @@ ABSOLUTE RULES:
 ---------------------------------------------------------
 SUCCESS HANDLING (incoming.status == "success")
 ---------------------------------------------------------
-You are guaranteed that incoming.description contains a valid result that matches the user's intent.
-It may be one of these forms:
-A) A single number (count of clicks).
-B) A descriptive success sentence including filters/date range.
-C) A JSON-like LIST OF ROWS (tabular data).
+CRITICAL: If you receive an "ACTUAL DATA" section in the input, you MUST display it as a table.
+Never just say "We found N rows" without showing the data.
 
-You must detect which case it is and respond accordingly. 
+The result may be one of these forms:
+A) A single aggregated number (count/sum of clicks).
+B) ACTUAL DATA section with rows of data.
+C) Plain text description only (no data).
 
+You must detect which case it is and respond accordingly.
 **RENDERING PREFERENCE:**
 - **CHARTS (PRIORITY)**: If the user asks for "chart", "graph", "bar", "line", "pie", "visualize", "plot", "show as", "display as" → ALWAYS use render_type="chart" (auto-generate chart_options if LLM doesn't).
 - **TABLES**: If the user asks for "table" or if the data is naturally tabular and user did NOT request a chart → use render_type="table".
 - **TEXT**: For simple counts or descriptions only.
 
+
 ### CASE A — SINGLE NUMBER / COUNT
 If incoming.description clearly represents a number of clicks:
 - Explain naturally and warmly in the user's language.
-- If the number is 0 or indicates "no results":
+- If the number is 0:
     Hebrew: "לא נמצאו קליקים עבור הבקשה שלך."
     English: "No clicks were found for your request."
+- Example: "We found 2,345 clicks for your request."
+
+### CASE B — ACTUAL DATA PROVIDED (most common)
+If you see an "ACTUAL DATA" section with JSON array of objects:
+MANDATORY: You MUST build and display a Markdown table.
+1) Parse the JSON list of objects.
+2) Extract all column names from all rows (union of keys).
+3) Build a clean Markdown table inside description.
 - Do not add any extra assumptions.
 
 ### CASE B — SUCCESS DESCRIPTION WITH FILTERS / RANGE
@@ -175,24 +186,30 @@ class ExplainerAgent(BaseAgent):
     def __init__(self):
         super().__init__(name="explainer_agent")
 
+        # Load .env from main_agent/.env explicitly (fallback to default search)
+        _env_path = os.path.join(os.path.dirname(__file__), "..", ".env")
+        try:
+            if os.path.exists(_env_path):
+                load_dotenv(_env_path)
+            else:
+                load_dotenv()
+        except Exception:
+            load_dotenv()
+
         api_key = os.getenv("GOOGLE_API_KEY")
-        # API key is optional - can use service account credentials via GOOGLE_APPLICATION_CREDENTIALS
-        if api_key:
-            # Gemini client (google-genai 1.52.0)
-            object.__setattr__(self, "client", genai.Client(api_key=api_key))
-        else:
-            # Use service account credentials with Vertex AI
-            object.__setattr__(self, "client", genai.Client(
-                vertexai=True,
-                project="practicode-2025",
-                location="us-central1"
-            ))
+        if not api_key:
+            raise ValueError("Missing GOOGLE_API_KEY environment variable.")
+
+        # Gemini client
+        object.__setattr__(self, "client", genai.Client(api_key=api_key))
 
     def run(self, state):
         # Handle both Pydantic model and dict inputs
         if isinstance(state, dict):
             user_question = state.get("user_question", "")
             incoming = state.get("incoming", {})
+            db_result = state.get("db_result")
+            sql = None  # do not expose SQL in user-visible prompt
             if isinstance(incoming, dict):
                 incoming_json = json.dumps(incoming)
             else:
@@ -210,6 +227,21 @@ class ExplainerAgent(BaseAgent):
         else:
             db_result = getattr(state, "db_result", None)
         
+            db_result = state.db_result
+            sql = None  # do not expose SQL in user-visible prompt
+
+        # If we have actual row data, add it to the prompt
+        if db_result and isinstance(db_result, list) and len(db_result) > 0:
+            db_result_json = json.dumps(db_result, ensure_ascii=False, indent=2)
+            data_section = f"""
+--------------------
+ACTUAL DATA (display this as a table):
+--------------------
+{db_result_json}
+"""
+        else:
+            data_section = ""
+
         # Build instruction + input
         prompt = f"""
 {EXPLANATION_SYSTEM_PROMPT}
@@ -223,6 +255,7 @@ USER QUESTION:
 EXECUTOR RESULT:
 --------------------
 {incoming_json}
+{data_section}
 
 --------------------
 ACTUAL DATA (if available):
@@ -232,12 +265,12 @@ ACTUAL DATA (if available):
 
         # Call Gemini
         response = self.client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents=prompt
+            model="gemini-2.5-flash",
+            contents=prompt,
         )
 
         # Extract text
-        content = response.text.strip()
+        content = (response.text or "").strip()
 
         # Strip code fences if the LLM returns ```json ... ```
         if content.startswith("```"):
@@ -254,6 +287,12 @@ ACTUAL DATA (if available):
         # Build ExplanationOutput state
         # Handle both dict and pydantic model inputs
         default_status = state.incoming.status if hasattr(state, 'incoming') else state.get('incoming', {}).get('status', 'unknown')
+        description = parsed.get("description", "")
+        
+        # Append SQL query for debugging if available
+        if sql:
+            description += f"\n\n---\n**SQL Query:**\n```sql\n{sql}\n```"
+        
 
         # Normalize chart options; if missing and data exists, auto-generate
         chart_options = _normalize_chart_options(parsed.get("chart_options"))
