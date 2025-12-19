@@ -33,6 +33,7 @@ ABSOLUTE RULES:
 ---------------------------------------------------------
 SUCCESS HANDLING (incoming.status == "success")
 ---------------------------------------------------------
+
 CRITICAL: If you receive an "ACTUAL DATA" section in the input, you MUST display it as a table.
 Never just say "We found N rows" without showing the data.
 
