@@ -35,10 +35,16 @@ class IntentAgent(BaseAgent):
         super().__init__(name="intent_agent")
 
         api_key = os.getenv("GOOGLE_API_KEY")
-        if not api_key:
-            raise ValueError("Missing GOOGLE_API_KEY environment variable.")
-
-        object.__setattr__(self, "client", genai.Client(api_key=api_key))
+        # API key is optional - can use service account credentials via GOOGLE_APPLICATION_CREDENTIALS
+        if api_key:
+            object.__setattr__(self, "client", genai.Client(api_key=api_key))
+        else:
+            # Use service account credentials with Vertex AI
+            object.__setattr__(self, "client", genai.Client(
+                vertexai=True,
+                project="practicode-2025",
+                location="us-central1"
+            ))
 
     # =========================
     # STATIC HELPERS FROM FRIEND
@@ -211,8 +217,10 @@ class IntentAgent(BaseAgent):
         )
 
         # site_id = 12 -> site_id = "site_id_12"
+        # site_id = "_335" -> site_id = "site_id_335"
+        # site_id = "site_id_335" -> keep as is
         sql = re.sub(
-            r'site_id\s*=\s*(\d+)',
+            r'site_id\s*=\s*["\']?_?(\d+)["\']?',
             r'site_id = "site_id_\1"',
             sql
         )
@@ -617,6 +625,9 @@ RAW triggers (no aggregation_spec):
   "תראי לי את כל הקליקים", "רשימה של קליקים", "נתונים גולמיים".
 
 AGGREGATION triggers (include aggregation_spec):
+- User asks for chart/graph/visualization:
+  "show bar chart", "bar chart", "chart", "graph", "visualize", "plot",
+  "display as chart", "as a graph", "טבלה", "גרף", "ויזואליזציה".
 - User asks for totals or summaries:
   "how many", "count clicks", "total events", "sum of clicks",
   "כמה", "סך הכל", "כמות קליקים".

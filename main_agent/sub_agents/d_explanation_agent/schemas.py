@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Literal, Any, Optional
+from typing import Literal, Optional, Dict, Any
 
 
 class ExecutorResult(BaseModel):
@@ -17,3 +17,7 @@ class ExplanationInput(BaseModel):
 class ExplanationOutput(BaseModel):
     status: Literal["success", "error"]
     description: str              # נוסח ידידותי למשתמש
+    render_type: Optional[Literal["text", "table", "chart"]] = None
+    table_markdown: Optional[str] = None
+    chart_image: Optional[str] = None  # PNG as markdown data URI
+    chart_options: Optional[Dict[str, Any]] = None  # ECharts configuration JSON

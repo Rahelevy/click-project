@@ -24,10 +24,16 @@ class FocusAgent(BaseAgent):
             load_dotenv()
 
         api_key = os.getenv("GOOGLE_API_KEY")
-        if not api_key:
-            raise ValueError("Missing GOOGLE_API_KEY environment variable.")
-
-        object.__setattr__(self, "client", genai.Client(api_key=api_key))
+        # API key is optional - can use service account credentials via GOOGLE_APPLICATION_CREDENTIALS
+        if api_key:
+            object.__setattr__(self, "client", genai.Client(api_key=api_key))
+        else:
+            # Use service account credentials with Vertex AI
+            object.__setattr__(self, "client", genai.Client(
+                vertexai=True,
+                project="practicode-2025",
+                location="us-central1"
+            ))
 
     def _normalize_state(self, state):
         """Allow RootAgent to pass dicts into FocusAgent."""
