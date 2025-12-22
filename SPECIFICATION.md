@@ -29,6 +29,21 @@ This system allows users to run analytics queries on AppsFlyer click data stored
 
 ## 3. Agent Architecture
 
+### Root Agent – Orchestration & Multi-Turn Context
+
+**Responsibility:** Orchestrate the four sub-agents and maintain conversation context across multiple turns.
+
+**Key Features:**
+- **Combined Question Context:** Merges previous question context with new user input to reduce back-and-forth
+- **Debug Tracing:** Tracks pipeline execution stages for debugging and transparency
+- **Smart Fallbacks:** Attempts multiple input formats when agent calls fail
+- **Cache Integration:** Checks and updates BigQuery cache before/after executor runs
+
+**Multi-Turn Conversation:**
+- Preserves question context from `session_state` (question, user_question, original_question, refined_question)
+- Combines previous context with new user message for better understanding
+- Reduces need for users to repeat information from previous turns
+
 ### Agent #1 – Intent Agent (Language-to-SQL Converter)
 
 **Responsibility:** Parse natural language questions, validate them, and generate SQL queries.
@@ -75,8 +90,11 @@ This system allows users to run analytics queries on AppsFlyer click data stored
 - **Invalid Question:** Forwards to Agent #2 for clarification
 - **Awaiting Input:** Requests missing essential information from user
 
-**Anomaly Requests (Planned):**
-- The Intent Agent will classify queries like "show me all the anomalies of 10-24-2025" as anomaly-intent and route them to an internal anomalies module (not a separate agent). This module will produce graphs and a short summary for the specified date/range. Implementation is in progress and will be documented later.
+**Anomaly Requests (In Development):**
+- A separate AnomalyAgent exists in `main_agent/sub_agents/anomaly_agent/` but is not yet integrated into the root pipeline
+- The agent can query the `practicode-2025.clicks_data_prac.final_anomalies` table
+- Supports methods: get_all_anomalies(), get_media_source_anomalies(), get_anomalies_by_hour()
+- Integration with the Intent Agent routing is planned for future releases
 
 ---
 
@@ -196,7 +214,17 @@ This system allows users to run analytics queries on AppsFlyer click data stored
    - Limits display to first 20 rows if data is large
    - Adds summary title and formatting
 
-4. **Error Handling:**
+4. **Chart Rendering:**
+   - Uses chart_generator module to create visualizations
+   - Supports time series and other data visualizations
+   - Renders charts as PNG images embedded in response
+   - Sets `render_type="chart"` and includes `chart_image` in output
+
+5. **Enhanced Table Display:**
+   - Provides formatted Markdown tables for structured data
+   - Sets `render_type="table"` and includes `table_markdown` in output
+
+6. **Error Handling:**
    - Translates technical error messages to user-friendly explanations
    - Suggests next steps when queries fail
 
@@ -281,16 +309,23 @@ Response to User
 
 ---
 
-### Anomaly Query Flow (Planned)
-When the user asks for anomalies (e.g., "show me all the anomalies of 10-24-2025"):
+### Anomaly Query Flow (In Development)
+An AnomalyAgent class exists but is not yet integrated into the main pipeline:
 
-1. Intent Agent classifies the request as anomaly-intent and extracts the date/range
-2. The Root pipeline invokes an internal anomalies module (not a separate agent)
-3. The anomalies module returns:
-   - Graphs (visual artifacts) summarizing anomalies
-   - A short, localized summary of the detected anomalies
-4. The UI displays the graphs and the summary to the user
-5. Technical specifics and detectors are being developed separately and will be added later
+**Current Status:**
+- Located in `main_agent/sub_agents/anomaly_agent/agent.py`
+- Queries `practicode-2025.clicks_data_prac.final_anomalies` table
+- Methods available:
+  - `get_all_anomalies()`: Returns top 200 anomalies by z-score
+  - `get_media_source_anomalies(media_source)`: Filters by specific media source
+  - `get_anomalies_by_hour(day, hour)`: Filters by specific day and hour
+  - `answer(question)`: Basic question parser (in development)
+
+**Future Integration Plan:**
+1. Intent Agent will detect anomaly-intent queries
+2. Root agent will route to AnomalyAgent instead of standard executor
+3. AnomalyAgent will return formatted results with visualizations
+4. Results will be passed to Explanation Agent for natural language summary
 
 ## 5. Data Model & Schemas
 
@@ -337,7 +372,11 @@ When the user asks for anomalies (e.g., "show me all the anomalies of 10-24-2025
 ```python
 {
   "status": "success" | "error",
-  "description": str            # Human-readable explanation
+  "description": str,           # Human-readable explanation
+  "render_type": "chart" | "table" | None,  # Optional rendering type
+  "chart_image": str | None,    # Base64 or embedded chart image (if render_type="chart")
+  "table_markdown": str | None, # Formatted Markdown table (if render_type="table")
+  "_debug_trace": [str]         # Optional debug trace from root agent
 }
 ```
 
@@ -428,30 +467,45 @@ BQ_CACHE_ENABLED           # Enable/disable caching (default: true)
 
 ## 11. Future Enhancements
 
-1. **Anomaly Detection:** Build specialized agent to identify unusual patterns in results
+1. **Anomaly Detection Integration:** Complete integration of existing AnomalyAgent into main pipeline
 2. **Multi-Query Support:** Allow users to ask compound questions requiring multiple SQL queries
 3. **Fraud Detection:** Integrate fraud-detection tools using query results
 4. **Query History:** Store and retrieve past user queries for insights
 5. **FAQ Mode:** Pre-built answers for common questions
 6. **Custom Metrics:** Support user-defined metrics and KPIs
-7. **Result Visualization:** Generate charts and visualizations for complex results
+7. **Enhanced Visualizations:** Expand chart types and visualization options (basic chart support exists)
 8. **Bulk Operations:** Support batch processing of multiple queries
+9. **Anomaly Explanation:** Natural language explanations for detected anomalies
+10. **Interactive Charts:** Support for interactive visualizations in the UI
 
 ---
 
-## 12. Anomaly & Fraud Detection (Planned, Integrated)
+## 12. Anomaly Detection (In Development)
 
-This capability is planned but not implemented yet. It will be integrated as an internal module (not a separate agent) that the pipeline invokes when the user asks for anomalies or fraud insights.
+A separate AnomalyAgent has been implemented but is not yet integrated into the main pipeline.
 
-### What it will do
-- Handle queries like: "show me all the anomalies of 10-24-2025"
-- Return graphs visualizing anomalies for the requested date/range
-- Provide a short, localized summary of the anomalies
+### Current Implementation
+- **Location:** `main_agent/sub_agents/anomaly_agent/agent.py`
+- **Data Source:** BigQuery table `practicode-2025.clicks_data_prac.final_anomalies`
+- **Query Methods:**
+  - `get_all_anomalies()`: Returns top 200 anomalies ordered by absolute z-score
+  - `get_media_source_anomalies(media_source)`: Filters anomalies by specific media source
+  - `get_anomalies_by_hour(day, hour)`: Filters by specific day and hour combination
 
-### How it fits the flow
-- The Intent Agent will classify anomaly-intent and extract the relevant date/range
-- The Root pipeline will call the internal anomalies module
-- The UI will display the returned graphs and summary
+### Data Schema
+The `final_anomalies` table contains:
+- `media_source`: Media source identifier
+- `day_date`: Date of the anomaly
+- `hour_of_day`: Hour when anomaly occurred
+- `z_score`: Statistical measure of anomaly severity
+- Additional metrics and dimensions
 
-### Status
-- Under active development by a teammate; technical details and detectors will be added to this document later
+### Integration Status
+- **Current:** AnomalyAgent is a standalone class not yet called by root pipeline
+- **Planned:** Intent Agent will detect anomaly queries and route to AnomalyAgent
+- **Future:** Support for visualization and natural language summaries of anomalies
+
+### SQL Queries
+Pre-built SQL templates are available in `main_agent/sub_agents/anomaly_agent/anomalies_queries/`:
+- `media_source_anomalies.sql`: Query template for media source anomaly detection
+- `media_source_hourly_agg.sql`: Hourly aggregation query template
