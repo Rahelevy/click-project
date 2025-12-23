@@ -178,8 +178,6 @@ def _normalize_sql(sql: str) -> str:
 
 def _generate_cache_key(sql: str) -> str:
     """Generate a SHA256 cache key from the normalized SQL only.
-
-    Note: params were removed — cache key is computed from SQL text alone.
     """
     key_input = _normalize_sql(sql)
     return hashlib.sha256(key_input.encode("utf-8")).hexdigest()

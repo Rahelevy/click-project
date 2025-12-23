@@ -12,6 +12,13 @@ try:
 except ImportError:
     HAS_MATPLOTLIB = False
 
+try:
+    from pyecharts.charts import Bar, Line, Pie
+    from pyecharts import options as opts
+    HAS_PYECHARTS = True
+except ImportError:
+    HAS_PYECHARTS = False
+
 
 def chart_options_to_png_base64(options: Dict[str, Any]) -> Optional[str]:
     """

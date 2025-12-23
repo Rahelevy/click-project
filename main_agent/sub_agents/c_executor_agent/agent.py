@@ -89,7 +89,7 @@ class ExecutorAgent(BaseAgent):
         sql = state.get("sql", "")
 
         # ---------------------------------------------
-        # SQL Validation (basic)
+        # SQL Validation
         # ---------------------------------------------
         if not sql or "select" not in sql.lower():
             output = AgentCOutput(
@@ -135,11 +135,8 @@ class ExecutorAgent(BaseAgent):
         # ---------------------------------------------
         try:
             client = self._get_bq_client()
-
-            # Submit query (explicit EU location for safety)
             query_job = client.query(sql_with_limit, location="EU")
             logger.debug("[Executor] BigQuery job submitted... waiting for result.")
-
             # Set a reasonable row limit to prevent memory overflow
             MAX_ROWS = 10000
             rows_iter = query_job.result(timeout=600, max_results=MAX_ROWS)
