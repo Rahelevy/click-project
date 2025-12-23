@@ -24,7 +24,6 @@ class RootAgent(BaseAgent):
     model_config = {"arbitrary_types_allowed": True, "extra": "allow"}
     def __repr__(self):
         return f"RootAgent(name={self.name})"
-    def __init__(self, intent_agent, focus_agent, executor_agent, explainer_agent, anomaly_agent):
     def __init__(self, intent_agent, focus_agent, executor_agent, explainer_agent, anomaly_agent=None):
         super().__init__(
             name="main_agent_root",
@@ -121,9 +120,16 @@ class RootAgent(BaseAgent):
         logger.debug(f"[Root] Intent-1 output = {intent_state}")
         debug_trace.append(f"Intent Agent Round 1: valid={intent_state.get('valid', False)}")
 
+        # Check if we're continuing an anomaly conversation from previous turn
+        prev_anomaly_state = session_state.get("root_state", {})
+        is_continuing_anomaly = (
+            prev_anomaly_state.get("query_type") == "anomaly" or 
+            "anomaly" in str(prev_anomaly_state.get("description", "")).lower()
+        )
+
         # ---------- 1.5) Route anomaly queries to anomaly agent ----------
-        if intent_state.get("query_type") == "anomaly" and self.anomaly_agent is not None:
-            logger.info("[Root] ✓ Routing to anomaly agent (detected by intent agent)")
+        if (intent_state.get("query_type") == "anomaly" or is_continuing_anomaly) and self.anomaly_agent is not None:
+            logger.info("[Root] ✓ Routing to anomaly agent (detected by intent agent or session context)")
             debug_trace.append("Anomaly Agent: Routing via query_type")
             try:
                 anomaly_result = self.anomaly_agent.answer(combined_q)
