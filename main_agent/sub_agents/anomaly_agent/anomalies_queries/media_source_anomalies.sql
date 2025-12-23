@@ -101,7 +101,9 @@ final_candidates AS (
 )
 
 -- החזרת 5 האנומליות החזקות ביותר לפי פער מוחלט
-SELECT *
+SELECT 
+  *,
+  actual_events / NULLIF(expected_events, 0) AS ratio
 FROM final_candidates
 ORDER BY absolute_gap DESC
 LIMIT 5;

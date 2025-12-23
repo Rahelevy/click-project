@@ -9,6 +9,7 @@ from main_agent.sub_agents.a_intent_agent.agent import IntentAgent
 from main_agent.sub_agents.b_focus_agent.agent import FocusAgent
 from main_agent.sub_agents.c_executor_agent.agent import ExecutorAgent
 from main_agent.sub_agents.d_explanation_agent.agent import ExplainerAgent
+from main_agent.sub_agents.anomaly_agent.agent import AnomalyAgent
 from main_agent.sub_agents.d_explanation_agent.schemas import (
     ExplanationInput,
     ExecutorResult,
@@ -22,13 +23,14 @@ class RootAgent(BaseAgent):
     model_config = {"arbitrary_types_allowed": True, "extra": "allow"}
     def __repr__(self):
         return f"RootAgent(name={self.name})"
-    def __init__(self, intent_agent, focus_agent, executor_agent, explainer_agent):
+    def __init__(self, intent_agent, focus_agent, executor_agent, explainer_agent, anomaly_agent=None):
         super().__init__(
             name="main_agent_root",
             intent_agent=intent_agent,
             focus_agent=focus_agent,
             executor_agent=executor_agent,
             explainer_agent=explainer_agent,
+            anomaly_agent=anomaly_agent,
             sub_agents=[intent_agent, focus_agent, executor_agent, explainer_agent],
         )
 
@@ -125,6 +127,33 @@ class RootAgent(BaseAgent):
         intent_state = a1.get("state", {}) or {}
         logger.debug(f"[Root] Intent-1 output = {intent_state}")
         debug_trace.append(f"Intent Agent Round 1: valid={intent_state.get('valid', False)}")
+
+        # ---------- 1.5) Route anomaly queries to anomaly agent ----------
+        if intent_state.get("query_type") == "anomaly" and self.anomaly_agent is not None:
+            logger.info("[Root] ✓ Routing to anomaly agent (detected by intent agent)")
+            debug_trace.append("Anomaly Agent: Routing via query_type")
+            try:
+                anomaly_result = self.anomaly_agent.answer(combined_q)
+                debug_trace.append("Anomaly Agent: Chart generated")
+                description = anomaly_result.get("description", "")
+                render_type = anomaly_result.get("render_type")
+                if render_type == "chart" and anomaly_result.get("chart_image"):
+                    answer = f"{description}\n\n{anomaly_result.get('chart_image')}"
+                elif render_type == "table" and anomaly_result.get("table_markdown"):
+                    answer = f"{description}\n\n{anomaly_result.get('table_markdown')}"
+                else:
+                    answer = description
+                
+                state_with_trace = dict(anomaly_result)
+                state_with_trace["_debug_trace"] = debug_trace
+                return {
+                    "stage": "done",
+                    "answer": answer,
+                    "state": state_with_trace,
+                }
+            except Exception:
+                logger.exception("[Root] Anomaly agent failed; falling back to normal pipeline")
+                debug_trace.append("Anomaly Agent: Failed, fallback to normal pipeline")
 
         # אם A מבקש קלט משתמש (בעיקר empty question) — עונים מיד, בלי B
         if intent_state.get("awaiting_user_input"):
@@ -278,39 +307,49 @@ class RootAgent(BaseAgent):
                     logger.debug(f"[Root] Skipping cache write: sql_for_cache={bool(sql_for_cache)}, exec_state_empty={not bool(exec_state)}")
             except Exception:
                 logger.exception("Failed to write cache for query")
-        # ---------- 4) Explainer ----------
-        # Explainer expects ExplanationInput pydantic. build it defensively.
-        debug_trace.append("Explainer: Generating friendly response")
-        logger.debug(f"[Root] exec_state keys: {exec_state.keys() if isinstance(exec_state, dict) else 'not a dict'}")
-        logger.debug(f"[Root] exec_state type: {type(exec_state)}")
-        try:
-            incoming = exec_state.get("incoming", {})
-            logger.debug(f"[Root] incoming type: {type(incoming)}, value: {incoming}")
-            explain_input = ExplanationInput(
-                user_question=exec_state.get("user_question") or executor_input.get("user_question"),
-                incoming=ExecutorResult(
-                    status=incoming.get("status") if isinstance(incoming, dict) else incoming.status,
-                    description=incoming.get("description") if isinstance(incoming, dict) else incoming.description,
-                ),
-                db_result=exec_state.get("db_result"),
-                sql=final_intent.get("sql"),
-            )
-        except Exception as e:
-            logger.exception(f"[Root] Failed to build ExplanationInput: {e}")
-            # last-resort: pass a simple dict to explainer_agent.run
-            explain_input = {
-                "user_question": exec_state.get("user_question") or executor_input.get("user_question"),
-                "incoming": exec_state.get("incoming"),
-                "db_result": exec_state.get("db_result"),
-                "sql": final_intent.get("sql"),
-            }
-        try:
-            d = self.explainer_agent.run(explain_input)
-        except Exception as e:
-            logger.exception(f"[Root] ExplainerAgent.run failed: {e}; attempting with dict input.")
-            d = self.explainer_agent.run(explain_input if isinstance(explain_input, dict) else explain_input.model_dump())
-        explain_state = d.get("state", {}) or {}
-        logger.debug(f"[Root] Explainer output = {explain_state}")
+        
+        # ---------- 4) Check if chart/table response already ready (bypass explainer) ----------
+        # If exec_state already has render_type + chart/table data (e.g., from anomaly agent),
+        # skip the explainer to avoid LLM latency/cost
+        if isinstance(exec_state, dict) and exec_state.get("render_type") in ("chart", "table"):
+            logger.info("[Root] ✓ Skipping explainer: chart/table response already prepared")
+            debug_trace.append("Explainer: Skipped (chart/table ready)")
+            explain_state = exec_state
+        else:
+            # ---------- 4) Explainer ----------
+            # Explainer expects ExplanationInput pydantic. build it defensively.
+            debug_trace.append("Explainer: Generating friendly response")
+            logger.debug(f"[Root] exec_state keys: {exec_state.keys() if isinstance(exec_state, dict) else 'not a dict'}")
+            logger.debug(f"[Root] exec_state type: {type(exec_state)}")
+            try:
+                incoming = exec_state.get("incoming", {})
+                logger.debug(f"[Root] incoming type: {type(incoming)}, value: {incoming}")
+                explain_input = ExplanationInput(
+                    user_question=exec_state.get("user_question") or executor_input.get("user_question"),
+                    incoming=ExecutorResult(
+                        status=incoming.get("status") if isinstance(incoming, dict) else incoming.status,
+                        description=incoming.get("description") if isinstance(incoming, dict) else incoming.description,
+                    ),
+                    db_result=exec_state.get("db_result"),
+                    sql=final_intent.get("sql"),
+                )
+            except Exception as e:
+                logger.exception(f"[Root] Failed to build ExplanationInput: {e}")
+                # last-resort: pass a simple dict to explainer_agent.run
+                explain_input = {
+                    "user_question": exec_state.get("user_question") or executor_input.get("user_question"),
+                    "incoming": exec_state.get("incoming"),
+                    "db_result": exec_state.get("db_result"),
+                    "sql": final_intent.get("sql"),
+                }
+            try:
+                d = self.explainer_agent.run(explain_input)
+            except Exception as e:
+                logger.exception(f"[Root] ExplainerAgent.run failed: {e}; attempting with dict input.")
+                d = self.explainer_agent.run(explain_input if isinstance(explain_input, dict) else explain_input.model_dump())
+            explain_state = d.get("state", {}) or {}
+            logger.debug(f"[Root] Explainer output = {explain_state}")
+        
         debug_trace.append("Pipeline Complete")
         # Convert Pydantic -> dict if needed
         if hasattr(explain_state, "model_dump"):
@@ -363,4 +402,5 @@ root_agent = RootAgent(
     focus_agent=FocusAgent(),
     executor_agent=ExecutorAgent(),
     explainer_agent=ExplainerAgent(),
+    anomaly_agent=AnomalyAgent(),
 )
