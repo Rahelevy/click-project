@@ -243,7 +243,9 @@ class IntentAgent(BaseAgent):
         ]
         eng = [
             "how many clicks", "total clicks", "number of clicks",
-            "how many events", "total events", "sum of clicks", "sum of events"
+            "how many events", "total events", "sum of clicks", "sum of events",
+            "count of clicks", "count of the clicks", "count clicks", "count the clicks",
+            "count of events", "count events"
         ]
 
         return any(p in question for p in heb) or any(p in q for p in eng)
@@ -294,6 +296,15 @@ class IntentAgent(BaseAgent):
         # Normalize dates to ISO to reduce ambiguity (e.g., 24-10-2025 → 2025-10-24)
         user_question = self._normalize_dates_in_text(user_question)
 
+        # ========================================
+        # PARTITION OPTIMIZATION (DAY-based)
+        # ========================================
+        # The table is partitioned by DATE(event_time) for optimal performance.
+        # If user provides a date or app_id, we can generate fast deterministic SQL
+        # that leverages partition pruning (reads only relevant partitions).
+        # See: main_agent/bigquery_partition_setup.sql for details.
+        # ========================================
+        
         # Deterministic minimal SQL: if at least one field (app_id and/or date) exists, build SQL without LLM.
         app_id_val = self._extract_app_id(user_question)
         date_val = self._extract_single_iso_date(user_question)
@@ -302,15 +313,28 @@ class IntentAgent(BaseAgent):
             if app_id_val:
                 where_clauses.append(f"app_id = \"{app_id_val}\"")
             if date_val:
+                # PARTITION PRUNING: DATE(event_time) is the partition key
+                # This filter automatically prunes to only the relevant partition
                 where_clauses.append(f"DATE(event_time) = \"{date_val}\"")
             where_sql = " AND ".join(where_clauses) if where_clauses else "TRUE"
-            base_sql = (
-                "SELECT event_time, hr, media_source, partner, app_id, site_id, "
-                "is_retargeting, is_engaged_view, total_events "
-                "FROM `practicode-2025.clicks_data_prac.encoded_clicks` "
-                f"WHERE {where_sql}"
-            )
-            base_sql = self._add_limit_to_sql(base_sql)
+            
+            # Check if user is asking for a COUNT / total clicks
+            if self._wants_total_clicks(user_question):
+                base_sql = (
+                    "SELECT SUM(total_events) AS total_clicks "
+                    "FROM `practicode-2025.clicks_data_prac.encoded_clicks` "
+                    f"WHERE {where_sql}"
+                )
+                # Don't add LIMIT to aggregation queries
+            else:
+                base_sql = (
+                    "SELECT event_time, hr, media_source, partner, app_id, site_id, "
+                    "is_retargeting, is_engaged_view, total_events "
+                    "FROM `practicode-2025.clicks_data_prac.encoded_clicks` "
+                    f"WHERE {where_sql}"
+                )
+                # Add LIMIT only for raw row queries
+                base_sql = self._add_limit_to_sql(base_sql)
 
             clean_state = {
                 "valid": True,

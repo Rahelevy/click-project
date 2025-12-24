@@ -23,6 +23,81 @@ def _normalize_chart_options(value):
     return None
 
 
+def _detect_top_request(question: str) -> bool:
+    """Heuristic to see if the user asked for the top/most item."""
+    if not question:
+        return False
+    q_lower = question.lower()
+    keywords = ["most", "highest", "top", "max", "largest", "leading", "biggest", "maximum"]
+    hebrew_keywords = ["הכי הרבה", "הגבוה", "מוביל", "מובילה", "גדול", "גבוהה"]
+    return any(k in q_lower for k in keywords) or any(k in question for k in hebrew_keywords)
+
+
+def _compute_top_finding(question, rows):
+    """Compute the top row by metric when the question asks for "most"/"top"."""
+    if not rows or not isinstance(rows, list):
+        return None
+    if not _detect_top_request(question):
+        return None
+
+    def is_number(value):
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+    sample_row = rows[0] if isinstance(rows[0], dict) else None
+    if not sample_row:
+        return None
+
+    metric_candidates = ["clicks", "count", "total", "value", "metric", "click_count"]
+    dimension_candidates = ["media_source", "source", "channel", "campaign", "name", "partner"]
+
+    metric_key = None
+    for key in metric_candidates:
+        if key in sample_row and is_number(sample_row[key]):
+            metric_key = key
+            break
+    if not metric_key:
+        for key, value in sample_row.items():
+            if is_number(value):
+                metric_key = key
+                break
+    if not metric_key:
+        return None
+
+    dimension_key = None
+    for key in dimension_candidates:
+        if key in sample_row:
+            dimension_key = key
+            break
+    if not dimension_key:
+        for key, value in sample_row.items():
+            if not is_number(value):
+                dimension_key = key
+                break
+    if not dimension_key:
+        return None
+
+    top_row = None
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if metric_key not in row or dimension_key not in row:
+            continue
+        if not is_number(row[metric_key]):
+            continue
+        if top_row is None or row[metric_key] > top_row[metric_key]:
+            top_row = row
+
+    if not top_row:
+        return None
+
+    return {
+        "dimension_key": dimension_key,
+        "dimension_value": top_row.get(dimension_key),
+        "metric_key": metric_key,
+        "metric_value": top_row.get(metric_key),
+    }
+
+
 EXPLANATION_SYSTEM_PROMPT = """
 You are AGENT D — the final layer before answering the end user.
 
@@ -243,6 +318,17 @@ ACTUAL DATA (display this as a table):
         else:
             data_section = ""
 
+        # If the user asked for "most/top", pre-compute the leader to guide the LLM
+        top_hint = ""
+        top_finding = _compute_top_finding(user_question, db_result)
+        if top_finding:
+            top_hint = f"""
+--------------------
+PRE-COMPUTED SUMMARY:
+--------------------
+Top {top_finding['metric_key']} by {top_finding['dimension_key']}: {top_finding['dimension_value']} with {top_finding['metric_value']} {top_finding['metric_key']}. Use this as the primary answer for any 'most/highest/top' question.
+"""
+
         # Build instruction + input
         prompt = f"""
 {EXPLANATION_SYSTEM_PROMPT}
@@ -258,6 +344,8 @@ EXECUTOR RESULT:
 {incoming_json}
 {data_section}
 
+{top_hint}
+
 --------------------
 ACTUAL DATA (if available):
 --------------------
@@ -266,7 +354,7 @@ ACTUAL DATA (if available):
 
         # Call Gemini
         response = self.client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-2.0-flash",
             contents=prompt,
         )
 
