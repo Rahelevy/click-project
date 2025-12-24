@@ -231,6 +231,39 @@ class IntentAgent(BaseAgent):
     # FORCE AGGREGATION WHEN USER ASKS "HOW MANY CLICKS"
     # ✅ NEW =========================
     @staticmethod
+    def _is_anomaly_query(question: str) -> bool:
+        """Detect if user is asking about anomalies/outliers/unusual patterns."""
+        if not question:
+            return False
+        
+        q = question.lower()
+        
+        # English keywords - comprehensive list including paraphrases
+        eng_keywords = [
+            "anomaly", "anomalies", "outlier", "outliers",
+            "unusual", "weird", "strange", "abnormal",
+            "spike", "drop", "deviation", "unexpected",
+            "suspicious", "suspiciously", 
+            "doesn't look normal", "don't look normal",
+            "doesn't look right", "don't look right",
+            "looks off", "look off",
+            "out of the ordinary",
+            "behave differently", "behaving differently",
+            "doesn't match", "don't match",
+            "something wrong", "what's wrong",
+            "irregular", "irregularities"
+        ]
+        
+        # Hebrew keywords
+        heb_keywords = [
+            "אנומליה", "אנומליות", "חריג", "חריגים",
+            "יוצא דופן", "מוזר", "לא רגיל", "בלתי צפוי",
+            "קפיצה", "ירידה חדה", "סטייה", "חשוד", "לא נראה תקין"
+        ]
+        
+        return any(kw in q for kw in eng_keywords) or any(kw in question for kw in heb_keywords)
+
+    @staticmethod
     def _wants_total_clicks(question: str) -> bool:
         if not question:
             return False
@@ -296,6 +329,24 @@ class IntentAgent(BaseAgent):
         # Normalize dates to ISO to reduce ambiguity (e.g., 24-10-2025 → 2025-10-24)
         user_question = self._normalize_dates_in_text(user_question)
 
+        # Check for anomaly queries first (fast-path with keyword matching)
+        # This is faster and more reliable than LLM classification
+        if self._is_anomaly_query(user_question):
+            logger.info("[IntentAgent] Detected anomaly query via keyword match")
+            return {
+                "state": AgentAOutput(
+                    valid=True,
+                    question=user_question,
+                    query_type="anomaly",
+                    sql=None,
+                    awaiting_user_input=False,
+                ).model_dump(),
+                "should_run_focus": False,
+                "should_run_executor": False,
+                "should_run_explainer": False,
+            }
+
+
         # ========================================
         # PARTITION OPTIMIZATION (DAY-based)
         # ========================================
@@ -342,6 +393,7 @@ class IntentAgent(BaseAgent):
                 "missing_fields": [],
                 "question_to_user": None,
                 "sql": base_sql,
+                "query_type": "sql",  # Default to SQL for deterministic path
                 "aggregation_spec": None,
                 "reason": None,
                 "question": user_question,
@@ -688,7 +740,47 @@ Rules:
 - If user asks time trend, group_by=["event_time"] and set time_granularity.
 
 ------------------------------------------------------------
-WHEN TO ASK FOR CLARIFICATION
+QUERY TYPE CLASSIFICATION (CRITICAL - DO THIS FIRST)
+------------------------------------------------------------
+**STEP 1: ALWAYS classify the query type BEFORE anything else.**
+
+Look at the user's question and determine if they are asking about:
+
+A) **ANOMALY/OUTLIER DETECTION** - set "query_type": "anomaly"
+   User wants to find unusual patterns, outliers, or anomalies in the data.
+   
+   Indicators:
+   - Direct words: "anomaly", "anomalies", "outlier", "unusual", "weird", 
+     "strange", "spike", "drop", "deviation", "suspicious"
+   - Paraphrases: "doesn't look normal", "don't look normal", "looks off",
+     "behave differently", "out of the ordinary", "doesn't match",
+     "find patterns that don't fit", "show me what's wrong"
+   - Hebrew: "אנומליה", "חריג", "לא רגיל", "מוזר"
+   
+   **IF ANOMALY QUERY:**
+   ```json
+   {{
+     "valid": true,
+     "awaiting_user_input": false,
+     "missing_fields": [],
+     "question_to_user": null,
+     "query_type": "anomaly",
+     "sql": null,
+     "aggregation_spec": null,
+     "reason": null,
+     "question": "{user_question}"
+   }}
+   ```
+   **STOP HERE. Return this JSON immediately. Do NOT generate SQL.**
+
+B) **REGULAR SQL QUERY** - set "query_type": "sql"
+   User wants regular data about clicks, events, apps, sources, dates.
+   Generate SQL as described below.
+
+**You MUST include "query_type" in EVERY response.**
+
+------------------------------------------------------------
+SQL QUERY GENERATION (ONLY IF query_type="sql")
 ------------------------------------------------------------
 CASE A – TOO BROAD  
 Hebrew:
@@ -722,7 +814,8 @@ return JSON ONLY in this shape:
  "awaiting_user_input": false,
  "missing_fields": [],
  "question_to_user": null,
- "sql": "<generated base SQL>",
+ "query_type": "sql" | "anomaly",
+ "sql": "<generated base SQL>" | null (null if query_type=anomaly),
  "aggregation_spec": <optional object or null>,
  "reason": null,
  "question": "{user_question}"
@@ -735,6 +828,7 @@ If NOT valid, return:
  "awaiting_user_input": false,
  "missing_fields": ["<short_reason_code>"],
  "question_to_user": null,
+ "query_type": "sql",
  "sql": null,
  "aggregation_spec": null,
  "reason": "<machine_reason_or_null>",
@@ -791,6 +885,16 @@ USER QUESTION:
         # ✅ NEW: Add LIMIT to prevent buffer allocation errors in BigQuery
         if parsed.get("valid") and parsed.get("sql"):
             parsed["sql"] = self._add_limit_to_sql(parsed["sql"])
+
+        # ✅ Ensure query_type is set (LLM should include it, but default to "sql" if missing)
+        # Note: If LLM returned query_type="anomaly", preserve it; otherwise default to "sql"
+        if "query_type" not in parsed:
+            # LLM didn't specify - default to sql
+            parsed["query_type"] = "sql"
+        
+        # If query_type is anomaly, ensure sql is null
+        if parsed.get("query_type") == "anomaly":
+            parsed["sql"] = None
 
         # Validate against schema if possible
         try:
