@@ -1,34 +1,20 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { isHebrew } from "./lib/mockApi";
 import { sendMessageSSE, createSession } from "./lib/adkClient";
+import { TableRenderer } from "./components/renderers/TableRenderer";
+import { isHebrew } from "./lib/mockApi";
 
 function cx(...arr) {
   return arr.filter(Boolean).join(" ");
 }
-
 function uid() {
   return Math.random().toString(16).slice(2) + Date.now().toString(16);
 }
-
 function formatTime(d = new Date()) {
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
-function Chip({ children, onClick }) {
-  return (
-    <button
-      onClick={onClick}
-      className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-white/80 hover:bg-white/10"
-      type="button"
-    >
-      {children}
-    </button>
-  );
-}
-
 function Bubble({ role, text, meta }) {
   const isUser = role === "user";
-
   return (
     <div className={cx("flex w-full", isUser ? "justify-end" : "justify-start")}>
       <div
@@ -77,30 +63,71 @@ function Typing() {
   );
 }
 
+const LS_KEY_CONVOS = "multi_agent_ui_convos_v1";
+const LS_KEY_ACTIVE = "multi_agent_ui_active_id_v1";
+
 export default function App() {
-  // ✅ sessionId אמיתי שמגיע מהשרת (לא uid())
+  const didInitRef = useRef(false); // ✅ Guard for StrictMode double-run
+
   const [sessionId, setSessionId] = useState(null);
   const [sessionError, setSessionError] = useState(null);
-
   const [showDebug, setShowDebug] = useState(true);
 
-  const [convos, setConvos] = useState(() => [
-    {
-      id: uid(),
-      title: "New chat",
-      messages: [
-        {
-          id: uid(),
-          role: "assistant",
-          text: "היי! מה תרצה לדעת?\nHi! What would you like to know?",
-          meta: { time: formatTime() },
-          debugState: { stage: "idle" },
-        },
-      ],
-    },
-  ]);
+  const [convos, setConvos] = useState(() => {
+    try {
+      const raw = localStorage.getItem(LS_KEY_CONVOS);
+      if (raw) return JSON.parse(raw);
+    } catch {}
+    return [];
+  });
 
-  const [activeId, setActiveId] = useState(convos[0].id);
+  const [activeId, setActiveId] = useState(() => {
+    try {
+      const raw = localStorage.getItem(LS_KEY_ACTIVE);
+      return raw || null;
+    } catch {
+      return null;
+    }
+  });
+
+  // ✅ One-time init that NEVER creates multiple chats
+  useEffect(() => {
+    if (didInitRef.current) return;
+    didInitRef.current = true;
+
+    // If no convos exist, create exactly one
+    if (!convos || convos.length === 0) {
+      const id = uid();
+      const firstChat = {
+        id,
+        title: "New chat",
+        messages: [
+          {
+            id: uid(),
+            role: "assistant",
+            text: "היי! מה תרצה לדעת?\nHi! What would you like to know?",
+            meta: { time: formatTime() },
+            debugState: { stage: "idle" },
+          },
+        ],
+      };
+      setConvos([firstChat]);
+      setActiveId(id);
+      return;
+    }
+
+    // If convos exist, ensure activeId valid
+    const exists = convos.some((c) => c.id === activeId);
+    if (!activeId || !exists) setActiveId(convos[0].id);
+  }, []); // ✅ IMPORTANT: empty deps
+
+  // ✅ Persist to localStorage
+  useEffect(() => {
+    try {
+      localStorage.setItem(LS_KEY_CONVOS, JSON.stringify(convos));
+      localStorage.setItem(LS_KEY_ACTIVE, String(activeId || ""));
+    } catch {}
+  }, [convos, activeId]);
 
   const active = useMemo(
     () => convos.find((c) => c.id === activeId),
@@ -109,14 +136,14 @@ export default function App() {
 
   const [input, setInput] = useState("");
   const [isLoading, setLoading] = useState(false);
-
   const listRef = useRef(null);
 
-  const lastDebug = useMemo(() => {
+  const lastAssistant = useMemo(() => {
     if (!active) return null;
-    const last = [...active.messages].reverse().find((m) => m.role === "assistant");
-    return last?.debugState || null;
+    return [...active.messages].reverse().find((m) => m.role === "assistant");
   }, [active]);
+
+  const lastDebug = useMemo(() => lastAssistant?.debugState || null, [lastAssistant]);
 
   function scrollToBottom() {
     requestAnimationFrame(() => {
@@ -131,30 +158,50 @@ export default function App() {
 
   function newChat() {
     const id = uid();
-    setConvos((prev) => [
-      {
-        id,
-        title: "New chat",
-        messages: [
-          {
-            id: uid(),
-            role: "assistant",
-            text: "היי! מה תרצה לדעת?\nHi! What would you like to know?",
-            meta: { time: formatTime() },
-            debugState: { stage: "idle" },
-          },
-        ],
-      },
-      ...prev,
-    ]);
+    const chat = {
+      id,
+      title: "New chat",
+      messages: [
+        {
+          id: uid(),
+          role: "assistant",
+          text: "היי! מה תרצה לדעת?\nHi! What would you like to know?",
+          meta: { time: formatTime() },
+          debugState: { stage: "idle" },
+        },
+      ],
+    };
+    setConvos((prev) => [chat, ...prev]);
     setActiveId(id);
     setInput("");
   }
 
-  // ✅ יצירת Session אמיתי מהשרת פעם אחת כשהאפליקציה עולה
+  function deleteChat(chatId) {
+    setConvos((prev) => prev.filter((c) => c.id !== chatId));
+    if (chatId === activeId) {
+      setTimeout(() => {
+        const remaining = convos.filter((c) => c.id !== chatId);
+        setActiveId(remaining[0]?.id || null);
+      }, 0);
+    }
+  }
+
+  function clearHistory() {
+    const ok = window.confirm(
+      "Are you sure you want to delete all chats? This cannot be undone."
+    );
+    if (!ok) return;
+    localStorage.removeItem(LS_KEY_CONVOS);
+    localStorage.removeItem(LS_KEY_ACTIVE);
+    didInitRef.current = false;
+    setConvos([]);
+    setActiveId(null);
+    setTimeout(() => window.location.reload(), 50);
+  }
+
+  // ✅ create session once
   useEffect(() => {
     let cancelled = false;
-
     async function boot() {
       try {
         const sid = await createSession({ appName: "main_agent", userId: "user" });
@@ -163,19 +210,16 @@ export default function App() {
         if (!cancelled) setSessionError(String(e));
       }
     }
-
     boot();
     return () => {
       cancelled = true;
     };
   }, []);
 
-  // ✅ UPDATED: send() uses SSE streaming + extracts correct text from ADK payload
   async function send(text) {
     const msg = (text ?? input).trim();
     if (!msg || !active) return;
 
-    // אם עוד אין sessionId אמיתי, לא שולחים
     if (!sessionId) {
       updateActive((c) => ({
         ...c,
@@ -195,7 +239,6 @@ export default function App() {
 
     setLoading(true);
 
-    // add user message
     updateActive((c) => ({
       ...c,
       title:
@@ -211,7 +254,6 @@ export default function App() {
     setInput("");
     scrollToBottom();
 
-    // add empty assistant message
     const assistantId = uid();
     updateActive((c) => ({
       ...c,
@@ -223,6 +265,7 @@ export default function App() {
           text: "",
           meta: { time: formatTime() },
           debugState: { stage: "streaming" },
+          uiState: null,
         },
       ],
     }));
@@ -234,7 +277,6 @@ export default function App() {
         message: msg,
         sessionId,
         onEvent: (evt) => {
-          // ✅ הכי חשוב: לקחת טקסט אמיתי מה־ADK
           const chunk =
             evt?.answer ??
             evt?.text ??
@@ -243,16 +285,40 @@ export default function App() {
             evt?.content?.text ??
             "";
 
-          // תמיד נעדכן debugState, אבל נוסיף טקסט רק אם יש chunk
+          const rootState = evt?.actions?.stateDelta?.root_state;
+
+          const stage =
+            evt?.stage ??
+            evt?.actions?.stateDelta?.stage ??
+            rootState?.stage ??
+            null;
+
+          const questionToUser =
+            rootState?.focus_state?.question_to_user ??
+            null;
+
           updateActive((c) => ({
             ...c,
             messages: c.messages.map((m) =>
-              m.id === assistantId ? { ...m, debugState: evt } : m
+              m.id === assistantId
+                ? { ...m, debugState: evt, uiState: rootState ?? m.uiState }
+                : m
             ),
           }));
 
-          if (!chunk) return;
+          if (stage === "awaiting_user_input" && questionToUser) {
+            updateActive((c) => ({
+              ...c,
+              messages: c.messages.map((m) =>
+                m.id === assistantId
+                  ? { ...m, text: questionToUser, debugState: evt }
+                  : m
+              ),
+            }));
+            return;
+          }
 
+          if (!chunk) return;
           lastText += chunk;
 
           updateActive((c) => ({
@@ -263,46 +329,11 @@ export default function App() {
           }));
         },
       });
-
-      // mark done
-      updateActive((c) => ({
-        ...c,
-        messages: c.messages.map((m) =>
-          m.id === assistantId
-            ? { ...m, debugState: { ...(m.debugState || {}), stage: "done" } }
-            : m
-        ),
-      }));
-    } catch (err) {
-      updateActive((c) => ({
-        ...c,
-        messages: c.messages.map((m) =>
-          m.id === assistantId
-            ? {
-                ...m,
-                text: "⚠️ Error: failed to stream response.",
-                debugState: { stage: "error", error: String(err) },
-              }
-            : m
-        ),
-      }));
     } finally {
       setLoading(false);
       scrollToBottom();
     }
   }
-
-  // Quick replies when awaiting input
-  const quickReplies = useMemo(() => {
-    const stage = lastDebug?.stage;
-    if (stage !== "awaiting_user_input") return [];
-
-    const he = isHebrew(active?.messages?.slice(-1)?.[0]?.text || "") || false;
-
-    return he
-      ? ["היום", "אתמול", "שבוע אחרון", "טווח תאריכים (YYYY-MM-DD עד YYYY-MM-DD)"]
-      : ["Today", "Yesterday", "Last 7 days", "Date range (YYYY-MM-DD to YYYY-MM-DD)"];
-  }, [lastDebug, active]);
 
   return (
     <div className="h-full w-full bg-[#0b0f14] text-white">
@@ -322,25 +353,54 @@ export default function App() {
             </button>
           </div>
 
+          <div className="px-4 pb-3">
+            <button
+              onClick={clearHistory}
+              className="w-full rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-200 hover:bg-red-500/20"
+              type="button"
+            >
+              Clear History
+            </button>
+          </div>
+
           <div className="px-2 pb-3">
             <div className="mb-2 px-2 text-[11px] uppercase tracking-wider text-white/40">
               Chats
             </div>
             <div className="space-y-1">
               {convos.map((c) => (
-                <button
+                <div
                   key={c.id}
-                  onClick={() => setActiveId(c.id)}
                   className={cx(
-                    "w-full rounded-xl px-3 py-2 text-left text-sm",
+                    "group flex items-center justify-between rounded-xl px-3 py-2",
                     c.id === activeId
                       ? "bg-white/10 text-white"
                       : "text-white/70 hover:bg-white/5"
                   )}
-                  type="button"
                 >
-                  <div className="truncate">{c.title}</div>
-                </button>
+                  <button
+                    onClick={() => setActiveId(c.id)}
+                    className="min-w-0 flex-1 truncate text-left text-sm"
+                    type="button"
+                  >
+                    {c.title}
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      const ok = window.confirm(
+                        isHebrew(c.title)
+                          ? "בטוחה שאת רוצה למחוק את הצ׳אט הזה?"
+                          : "Are you sure you want to delete this chat?"
+                      );
+                      if (ok) deleteChat(c.id);
+                    }}
+                    className="ml-2 hidden rounded-md px-2 py-1 text-xs text-white/40 hover:bg-white/10 hover:text-white group-hover:block"
+                    type="button"
+                  >
+                    ✕
+                  </button>
+                </div>
               ))}
             </div>
           </div>
@@ -378,31 +438,27 @@ export default function App() {
                 </div>
               </div>
               <div className="text-xs text-white/50">
-                Stage: <span className="text-white/80">{lastDebug?.stage || "idle"}</span>
+                Stage:{" "}
+                <span className="text-white/80">{lastDebug?.stage || "idle"}</span>
               </div>
             </div>
 
             {/* Messages */}
-            <div ref={listRef} className="flex-1 overflow-auto px-4 py-6">
+            <div className="flex-1 overflow-auto px-4 py-6">
               <div className="mx-auto flex w-full max-w-3xl flex-col gap-4">
-                {active?.messages?.map((m) => (
-                  <Bubble key={m.id} role={m.role} text={m.text} meta={m.meta} />
-                ))}
-
+                {active?.messages?.map((m) => {
+                  if (m.role === "assistant" && m.uiState?.render_type === "table") {
+                    return (
+                      <div key={m.id} className="flex justify-start">
+                        <TableRenderer state={m.uiState} />
+                      </div>
+                    );
+                  }
+                  return <Bubble key={m.id} role={m.role} text={m.text} meta={m.meta} />;
+                })}
                 {isLoading && (
                   <div className="flex justify-start">
                     <Typing />
-                  </div>
-                )}
-
-                {/* Quick replies */}
-                {quickReplies.length > 0 && !isLoading && (
-                  <div className="mt-2 flex flex-wrap gap-2">
-                    {quickReplies.map((q) => (
-                      <Chip key={q} onClick={() => send(q)}>
-                        {q}
-                      </Chip>
-                    ))}
                   </div>
                 )}
               </div>
@@ -443,16 +499,12 @@ export default function App() {
             </div>
           </div>
 
-          {/* Debug Drawer */}
+          {/* Debug */}
           {showDebug && (
             <aside className="hidden w-[360px] shrink-0 border-l border-white/10 bg-black/20 lg:block">
               <div className="border-b border-white/10 px-4 py-3">
                 <div className="text-sm font-semibold text-white/90">Debug</div>
-                <div className="text-xs text-white/50">
-                  Last assistant state (mocked RootAgent output)
-                </div>
               </div>
-
               <div className="p-4">
                 <div className="rounded-2xl border border-white/10 bg-white/5 p-3">
                   <div className="mb-2 text-xs font-semibold text-white/80">
@@ -461,11 +513,6 @@ export default function App() {
                   <pre className="max-h-[70vh] overflow-auto whitespace-pre-wrap break-words rounded-xl bg-black/30 p-3 text-[11px] text-white/70">
                     {JSON.stringify(lastDebug, null, 2)}
                   </pre>
-                </div>
-
-                <div className="mt-4 text-[11px] text-white/50">
-                  כשתחברי ל-backend אמיתי, פשוט נחליף את{" "}
-                  <span className="font-mono">sendMessageMock</span> ב-fetch.
                 </div>
               </div>
             </aside>
