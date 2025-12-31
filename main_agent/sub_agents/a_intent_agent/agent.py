@@ -124,6 +124,26 @@ class IntentAgent(BaseAgent):
         return None
 
     @staticmethod
+    def _extract_hour(text: str) -> int | None:
+        if not text:
+            return None
+        # Match "hour 9", "hr 9", "שעה 9", "at 9", "9:00", etc.
+        patterns = [
+            r"\bhour\s+(\d{1,2})\b",  # hour 9
+            r"\bhr\s+(\d{1,2})\b",    # hr 9
+            r"\bשעה\s+(\d{1,2})\b",  # שעה 9
+            r"\bat\s+(\d{1,2})\b",    # at 9
+            r"\b(\d{1,2}):\d{2}\b",   # 9:00
+        ]
+        for pattern in patterns:
+            m = re.search(pattern, text, flags=re.IGNORECASE)
+            if m:
+                hour = int(m.group(1))
+                if 0 <= hour <= 23:
+                    return hour
+        return None
+
+    @staticmethod
     def _extract_single_iso_date(text: str) -> str | None:
         if not text:
             return None
@@ -275,9 +295,10 @@ class IntentAgent(BaseAgent):
         media_source_val = self._extract_media_source(user_question)
         partner_val = self._extract_partner(user_question)
         site_id_val = self._extract_site_id(user_question)
+        hour_val = self._extract_hour(user_question)
 
         # ✅ deterministic SQL only when at least one filter exists
-        if app_id_val or date_val or media_source_val or partner_val or site_id_val:
+        if app_id_val or date_val or media_source_val or partner_val or site_id_val or hour_val:
             where_clauses = []
             if app_id_val:
                 where_clauses.append(f'app_id = "{app_id_val}"')
@@ -289,6 +310,8 @@ class IntentAgent(BaseAgent):
                 where_clauses.append(f'site_id = "{site_id_val}"')
             if date_val:
                 where_clauses.append(f'DATE(event_time) = "{date_val}"')
+            if hour_val is not None:
+                where_clauses.append(f'hr = {hour_val}')
 
             where_sql = " AND ".join(where_clauses) if where_clauses else "TRUE"
 
