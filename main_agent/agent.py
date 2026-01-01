@@ -131,10 +131,10 @@ class RootAgent(BaseAgent):
                 debug_trace.append("Anomaly Agent: Chart generated")
                 description = anomaly_result.get("description", "")
                 render_type = anomaly_result.get("render_type")
-                if render_type == "chart" and anomaly_result.get("chart_image"):
-                    answer = f"{description}\n\n{anomaly_result.get('chart_image')}"
-                elif render_type == "table" and anomaly_result.get("table_markdown"):
-                    answer = f"{description}\n\n{anomaly_result.get('table_markdown')}"
+                
+                # For charts and tables, frontend renders from state, not from answer text
+                if render_type in ("chart", "table"):
+                    answer = description
                 else:
                     answer = description
 
@@ -364,10 +364,10 @@ class RootAgent(BaseAgent):
         description = explain_state.get("description", "")
         render_type = explain_state.get("render_type")
 
-        if render_type == "chart" and explain_state.get("chart_image"):
-            answer = f"{description}\n\n{explain_state.get('chart_image')}"
-        elif render_type == "table" and explain_state.get("table_markdown"):
-            answer = f"{description}\n\n{explain_state.get('table_markdown')}"
+        # For charts and tables, the frontend will render them from uiState
+        # So we only send the description in the answer text
+        if render_type in ("chart", "table"):
+            answer = description
         else:
             answer = description
 

@@ -34,6 +34,16 @@ def _detect_top_request(question: str) -> bool:
     return any(k in q_lower for k in keywords) or any(k in question for k in hebrew_keywords)
 
 
+def _detect_chart_request(question: str) -> bool:
+    """Heuristic to see if the user asked for a chart/graph/visualization."""
+    if not question:
+        return False
+    q_lower = question.lower()
+    keywords = ["chart", "graph", "plot", "visualize", "visualization", "show me a chart", "show me a graph"]
+    hebrew_keywords = ["גרף", "תרשים", "ויזואליזציה", "הצג", "הראה"]
+    return any(k in q_lower for k in keywords) or any(k in question for k in hebrew_keywords)
+
+
 def _compute_top_finding(question, rows):
     """Compute the top row by metric when the question asks for "most"/"top"."""
     if not rows or not isinstance(rows, list):
@@ -129,21 +139,22 @@ ABSOLUTE RULES:
   "chart_options": null
 }
 
-CRITICAL UI RULE:
-- If db_result exists and has at least 1 row:
-  - You MUST return render_type="table"
-  - description MUST be a short title that matches the content.
-  - table_markdown MUST ALWAYS be null (NEVER output markdown tables).
-  - NEVER mention row limits ("first 20", "only 20", etc.)
-  - NEVER dump the table in text.
-  - The frontend will render the table using db_result.
+CRITICAL UI RULE (IN ORDER OF PRIORITY):
+1. If user explicitly asked for a chart / graph / visualization / plot:
+   - You MUST return render_type="chart" (even if db_result exists)
+   - Set chart_options to null (will be auto-generated from db_result)
+   - description should be a short caption matching the chart request.
 
-- If user asked for a chart / graph:
-  - Return render_type="chart" and chart_options (valid ECharts JSON)
-  - description should be a short caption.
+2. Else, if db_result exists and has at least 1 row:
+   - You MUST return render_type="table"
+   - description MUST be a short title that matches the content.
+   - table_markdown MUST ALWAYS be null (NEVER output markdown tables).
+   - NEVER mention row limits ("first 20", "only 20", etc.)
+   - NEVER dump the table in text.
+   - The frontend will render the table using db_result.
 
-- If no db_result and no chart needed:
-  - Return render_type="text" and a short friendly answer.
+3. If no db_result and no chart needed:
+   - Return render_type="text" and a short friendly answer.
 
 Never output SQL.
 Never invent data.
@@ -261,8 +272,11 @@ Example row keys: {list(db_result[0].keys()) if has_rows and isinstance(db_resul
             else state.get("incoming", {}).get("status", "unknown")
         )
 
-        # ✅ FORCE CLEAN OUTPUT IN TABLE CASE:
-        if has_rows:
+        # ✅ Check if user asked for a chart
+        user_wants_chart = _detect_chart_request(user_question)
+
+        # ✅ FORCE CLEAN OUTPUT IN TABLE CASE (unless user wants chart):
+        if has_rows and not user_wants_chart:
             app_id = _extract_app_id_from_question(user_question)
             # If model didn't give good title, create one
             if not parsed.get("description"):
@@ -277,6 +291,12 @@ Example row keys: {list(db_result[0].keys()) if has_rows and isinstance(db_resul
 
             # Ensure no "first 20" appears
             parsed["description"] = re.sub(r"first\s+\d+\s+rows.*", "", parsed["description"], flags=re.IGNORECASE).strip()
+        
+        # ✅ If user wants chart and has data, force chart mode
+        elif has_rows and user_wants_chart:
+            if parsed.get("render_type") != "chart":
+                parsed["render_type"] = "chart"
+            parsed["table_markdown"] = None
 
         # Normalize chart options if chart
         chart_options = _normalize_chart_options(parsed.get("chart_options"))
@@ -288,7 +308,8 @@ Example row keys: {list(db_result[0].keys()) if has_rows and isinstance(db_resul
                 chart_options = rows_to_echarts_options(
                     db_result,
                     chart_type=chart_type,
-                    title=parsed.get("description", "Chart")
+                    title=parsed.get("description", "Chart"),
+                    user_question=user_question  # ✅ Pass user question for smart column detection
                 )
             except Exception as e:
                 print(f"Warning: Failed to generate chart: {e}")

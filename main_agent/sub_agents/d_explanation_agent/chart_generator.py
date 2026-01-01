@@ -74,7 +74,8 @@ def chart_options_to_png_base64(options: Dict[str, Any]) -> Optional[str]:
         img_base64 = base64.b64encode(buffer.read()).decode('utf-8')
         plt.close(fig)
         
-        return f"![Chart](data:image/png;base64,{img_base64})"
+        # Return just the data URI, not wrapped in markdown
+        return f"data:image/png;base64,{img_base64}"
     
     except Exception as e:
         print(f"Error converting chart to PNG: {e}")
@@ -86,23 +87,84 @@ def rows_to_echarts_options(
     chart_type: str = "bar",
     x_column: Optional[str] = None,
     y_column: Optional[str] = None,
-    title: str = "Chart"
+    title: str = "Chart",
+    user_question: Optional[str] = None
 ) -> Dict[str, Any]:
-    """Convert tabular data to a plain ECharts options dict (no HTML/JS)."""
+    """Convert tabular data to a plain ECharts options dict (no HTML/JS).
+    
+    Args:
+        rows: List of dictionaries with data
+        chart_type: "bar", "line", or "pie"
+        x_column: Column name for X-axis (auto-detect if None)
+        y_column: Column name for Y-axis (auto-detect if None)
+        title: Chart title
+        user_question: Optional user question for smart column detection
+    """
     if not rows:
         return {}
 
-    # Auto-detect columns
+    # Auto-detect columns intelligently based on user question
     if x_column is None or y_column is None:
         columns = list(rows[0].keys())
+        question_lower = (user_question or title).lower()
+        
+        # Try to find a good label column (for X-axis) by analyzing user question
         if x_column is None:
-            x_column = columns[0]
+            # Build candidates based on what user is asking about
+            label_candidates = []
+            
+            # Look for keywords in question to determine focus
+            # Only add candidates that actually exist in the data
+            if "app" in question_lower and "app_id" in columns:
+                label_candidates.append("app_id")
+            if ("media" in question_lower or "source" in question_lower) and "media_source" in columns:
+                label_candidates.append("media_source")
+            if "partner" in question_lower and "partner" in columns:
+                label_candidates.append("partner")
+            if "engagement" in question_lower and "engagement_type" in columns:
+                label_candidates.append("engagement_type")
+            if "site" in question_lower and "site_id" in columns:
+                label_candidates.append("site_id")
+            
+            # Add all string/non-numeric columns as fallback (these are good for X-axis)
+            for col in columns:
+                if col not in label_candidates:
+                    sample_val = rows[0].get(col)
+                    if not isinstance(sample_val, (int, float)) or isinstance(sample_val, bool):
+                        if col != "_rid":  # Skip internal columns only
+                            label_candidates.append(col)
+            
+            # Find first matching column
+            x_column = label_candidates[0] if label_candidates else columns[0]
+        
+        # Try to find a good numeric column (for Y-axis)
         if y_column is None:
-            y_column = columns[1] if len(columns) > 1 else columns[0]
-
-    x_values = [str(row.get(x_column, "")) for row in rows[:50]]
+            numeric_candidates = ["total_events", "clicks", "click_count", "count", "total", "value", "metric"]
+            # First check for explicit numeric column names (exclude hr, which is just the hour number)
+            y_column = next((col for col in numeric_candidates if col in columns), None)
+            
+            # If not found, find first numeric column
+            if y_column is None:
+                for col in columns:
+                    if col != x_column:
+                        val = rows[0].get(col)
+                        if isinstance(val, (int, float)) and not isinstance(val, bool):
+                            y_column = col
+                            break
+            
+            # Fallback
+            if y_column is None:
+                y_column = columns[1] if len(columns) > 1 else columns[0]
+    
+    # Detect if user asked for "top N" in the title
+    import re
+    top_n_match = re.search(r'\btop\s+(\d+)\b', title.lower())
+    limit = int(top_n_match.group(1)) if top_n_match else 50
+    
+    # Use data as-is but limit to top N
+    x_values = [str(row.get(x_column, "")) for row in rows[:limit]]
     y_values: List[float] = []
-    for row in rows[:50]:
+    for row in rows[:limit]:
         val = row.get(y_column)
         try:
             y_values.append(float(val) if val is not None else 0.0)
