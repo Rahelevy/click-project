@@ -18,7 +18,6 @@ print("\n>>> SUCCESS CASE RESULT:")
 print(result_success)
 print(result_success["state"])
 
-
 # -------------------------------------------------------
 # SQL VALIDATION TEST
 # -------------------------------------------------------
@@ -31,7 +30,6 @@ result_invalid = agent.run(state_invalid_sql)
 print("\n>>> INVALID SQL RESULT:")
 print(result_invalid)
 print(result_invalid["state"])
-
 
 # -------------------------------------------------------
 # BROKEN SQL SYNTAX TEST

@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { sendMessageSSE, createSession } from "./lib/adkClient";
 import { TableRenderer } from "./components/renderers/TableRenderer";
+import { ChartRenderer } from "./components/renderers/ChartRenderer";
 import { isHebrew } from "./lib/mockApi";
 
 function cx(...arr) {
@@ -451,6 +452,13 @@ export default function App() {
                     return (
                       <div key={m.id} className="flex justify-start">
                         <TableRenderer state={m.uiState} />
+                      </div>
+                    );
+                  }
+                  if (m.role === "assistant" && m.uiState?.render_type === "chart") {
+                    return (
+                      <div key={m.id} className="flex justify-start">
+                        <ChartRenderer state={m.uiState} />
                       </div>
                     );
                   }
