@@ -139,18 +139,35 @@ def rows_to_echarts_options(
         
         # Try to find a good numeric column (for Y-axis)
         if y_column is None:
-            numeric_candidates = ["total_events", "clicks", "click_count", "count", "total", "value", "metric"]
+            numeric_candidates = ["total_clicks", "total_events", "clicks", "click_count", "count", "total", "value", "metric"]
             # First check for explicit numeric column names (exclude hr, which is just the hour number)
             y_column = next((col for col in numeric_candidates if col in columns), None)
             
             # If not found, find first numeric column
             if y_column is None:
+                def _to_float(v):
+                    try:
+                        if v is None or isinstance(v, bool):
+                            return None
+                        return float(v)
+                    except Exception:
+                        return None
+
+                best_col = None
+                best_range = -1.0
                 for col in columns:
-                    if col != x_column:
-                        val = rows[0].get(col)
-                        if isinstance(val, (int, float)) and not isinstance(val, bool):
-                            y_column = col
-                            break
+                    if col == x_column:
+                        continue
+                    vals = [_to_float(r.get(col)) for r in rows[:50]]
+                    vals = [v for v in vals if v is not None]
+                    if not vals:
+                        continue
+                    col_range = max(vals) - min(vals)
+                    if col_range > best_range:
+                        best_range = col_range
+                        best_col = col
+
+                y_column = best_col
             
             # Fallback
             if y_column is None:
@@ -161,15 +178,35 @@ def rows_to_echarts_options(
     top_n_match = re.search(r'\btop\s+(\d+)\b', title.lower())
     limit = int(top_n_match.group(1)) if top_n_match else 50
     
-    # Use data as-is but limit to top N
-    x_values = [str(row.get(x_column, "")) for row in rows[:limit]]
-    y_values: List[float] = []
-    for row in rows[:limit]:
-        val = row.get(y_column)
+    # Aggregate by label: sum metric per x, then sort desc and keep top N
+    def _safe_float(v):
         try:
-            y_values.append(float(val) if val is not None else 0.0)
-        except (ValueError, TypeError):
-            y_values.append(0.0)
+            if v is None or isinstance(v, bool):
+                return 0.0
+            return float(v)
+        except Exception:
+            return 0.0
+
+    from collections import defaultdict
+
+    agg = defaultdict(float)
+    for row in rows:
+        x_val = str(row.get(x_column, ""))
+        y_val = _safe_float(row.get(y_column))
+        agg[x_val] += y_val
+
+    pairs = sorted(agg.items(), key=lambda p: p[1], reverse=True)[:limit]
+
+    # If all values identical or zero, fallback to frequency count of x_column
+    if pairs:
+        ys = [p[1] for p in pairs]
+        if max(ys) == min(ys):
+            from collections import Counter
+            counts = Counter(str(row.get(x_column, "")) for row in rows)
+            pairs = [(k, float(v)) for k, v in counts.most_common(limit)]
+
+    x_values = [p[0] for p in pairs]
+    y_values = [p[1] for p in pairs]
 
     base_opts = {
         "title": {"text": title},

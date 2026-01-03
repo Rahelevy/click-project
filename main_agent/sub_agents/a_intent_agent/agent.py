@@ -13,6 +13,16 @@ from .schemas import AgentAOutput
 logger = logging.getLogger("intent")
 logger.debug("🔥 IntentAgent loaded")
 
+# ============================================
+# QUERY LIMIT CONFIGURATION
+# ============================================
+# Controls LIMIT clause added to queries without explicit aggregation
+# Adjust these values based on your data volume and performance needs
+QUERY_LIMIT_DEFAULT = int(os.getenv("QUERY_LIMIT_DEFAULT", "100000"))  # Default limit for non-aggregated queries
+QUERY_LIMIT_RAW_DATA = int(os.getenv("QUERY_LIMIT_RAW_DATA", "50000"))  # Limit for raw detail queries
+
+logger.info(f"[IntentAgent Config] QUERY_LIMIT_DEFAULT={QUERY_LIMIT_DEFAULT}, QUERY_LIMIT_RAW_DATA={QUERY_LIMIT_RAW_DATA}")
+
 _env_path = os.path.join(os.path.dirname(__file__), "..", ".env")
 try:
     if os.path.exists(_env_path):
@@ -153,11 +163,19 @@ class IntentAgent(BaseAgent):
         return None
 
     @staticmethod
-    def _add_limit_to_sql(sql: str, limit: int = 1000) -> str:
+    def _add_limit_to_sql(sql: str, limit: int = None) -> str:
+        """
+        Add LIMIT clause to SQL if one doesn't exist.
+        Uses QUERY_LIMIT_RAW_DATA by default, or the specified limit.
+        """
         if not sql:
             return sql
         if "limit" in sql.lower():
             return sql
+        
+        if limit is None:
+            limit = QUERY_LIMIT_RAW_DATA
+        
         sql = sql.rstrip()
         if sql.endswith(";"):
             sql = sql[:-1]
@@ -257,6 +275,29 @@ class IntentAgent(BaseAgent):
         )
 
     # =========================
+    # TOP-N DIMENSION DETECTION
+    # =========================
+    @staticmethod
+    def _wants_top_apps(question: str) -> bool:
+        if not question:
+            return False
+        q = question.lower()
+        return ("top" in q or "most" in q or "highest" in q) and ("app" in q or "app_id" in q)
+
+    @staticmethod
+    def _extract_top_n(question: str, default: int = 5) -> int:
+        if not question:
+            return default
+        m = re.search(r"\btop\s+(\d+)\b", question.lower())
+        if m:
+            try:
+                n = int(m.group(1))
+                return n if n > 0 else default
+            except Exception:
+                return default
+        return default
+
+    # =========================
     # MAIN RUN
     # =========================
     def run(self, state):
@@ -315,21 +356,37 @@ class IntentAgent(BaseAgent):
 
             where_sql = " AND ".join(where_clauses) if where_clauses else "TRUE"
 
-            # ✅ if the user asked for totals - aggregate
-            if self._wants_total_clicks(user_question):
+            aggregation_spec = None
+
+            # ✅ if the user asked for totals - aggregate total only
+            if self._wants_total_clicks(user_question) and not self._wants_top_apps(user_question):
                 base_sql = (
                     "SELECT SUM(total_events) AS total_clicks "
                     "FROM `practicode-2025.clicks_data_prac.encoded_clicks` "
                     f"WHERE {where_sql}"
                 )
             else:
+                # Base query without LIMIT; aggregation_spec will add grouping/limit if needed
                 base_sql = (
                     "SELECT event_time, hr, media_source, partner, app_id, site_id, "
                     "is_retargeting, is_engaged_view, total_events "
                     "FROM `practicode-2025.clicks_data_prac.encoded_clicks` "
                     f"WHERE {where_sql}"
                 )
-                base_sql = self._add_limit_to_sql(base_sql)
+
+                # If user asked for top-N apps, request aggregation in Executor
+                if self._wants_top_apps(user_question):
+                    top_n = self._extract_top_n(user_question, default=5)
+                    aggregation_spec = {
+                        "group_by": ["app_id"],
+                        "metric_alias": "total_clicks",
+                        "top_n": top_n,
+                        "add_percent": False,
+                        "time_granularity": None,
+                    }
+                else:
+                    # If no aggregation requested, keep a sane limit to avoid huge row sets
+                    base_sql = self._add_limit_to_sql(base_sql)
 
             clean_state = {
                 "valid": True,
@@ -338,7 +395,7 @@ class IntentAgent(BaseAgent):
                 "question_to_user": None,
                 "sql": base_sql,
                 "query_type": "sql",
-                "aggregation_spec": None,
+                "aggregation_spec": aggregation_spec,
                 "reason": None,
                 "question": user_question,
             }

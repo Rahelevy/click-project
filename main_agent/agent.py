@@ -291,7 +291,7 @@ class RootAgent(BaseAgent):
         if sql_for_cache:
             try:
                 logger.debug(f"[Root] Cache lookup for SQL: {sql_for_cache[:100]}")
-                cached = bq_cache_get(sql_for_cache, question_signature=question_sig)
+                cached = bq_cache_get(sql_for_cache)
                 if cached is not None:
                     logger.info("[Root] ✓ CACHE HIT - Using cached result")
                     debug_trace.append("Cache Hit: Using cached result")
@@ -309,14 +309,14 @@ class RootAgent(BaseAgent):
                 logger.exception("ExecutorAgent.run failed with dict; attempting to pass via keyword fallback.")
                 c = self.executor_agent.run(user_question=executor_input.get("user_question"), sql=executor_input.get("sql"))
             exec_state = c.get("state", {}) or {}
-            logger.debug(f"[Root] Executor output = {exec_state}")
+            #logger.debug(f"[Root] Executor output = {exec_state}")
             debug_trace.append("Executor: Query completed")
 
             # ---------- Cache write (MERGE) ----------
             try:
                 if sql_for_cache and exec_state:
                     logger.debug(f"[Root] Attempting cache write for SQL: {sql_for_cache[:80]}")
-                    cache_ok = bq_cache_set(sql_for_cache, exec_state, question_signature=question_sig)
+                    cache_ok = bq_cache_set(sql_for_cache, exec_state)
                     if cache_ok:
                         logger.info(f"[Root] ✓ Cache write successful for SQL: {sql_for_cache[:80]}")
                     else:

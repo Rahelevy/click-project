@@ -6,11 +6,23 @@ from typing import Any, Dict, List
 from datetime import datetime, date, time
 from google.adk.agents import BaseAgent
 from google.cloud import bigquery
+import os
 
 from .schemas import AgentCOutput, IncomingResult
 
 # NEW: aggregation imports
 from .aggregations import build_aggregated_sql, AggregationSpec
+
+# ============================================
+# RESULT SIZE CONFIGURATION
+# ============================================
+# Controls maximum rows returned and LIMIT clause in BigQuery
+# Adjust these based on your UI/memory constraints
+SQL_LIMIT_CLAUSE = int(os.getenv("SQL_LIMIT_CLAUSE", "500000"))  # LIMIT clause in SQL to prevent BigQuery buffer issues
+MAX_ROWS_RETURNED = int(os.getenv("MAX_ROWS_RETURNED", "100000"))  # Maximum rows returned to frontend
+MAX_ROWS_AGGREGATED = int(os.getenv("MAX_ROWS_AGGREGATED", "50000"))  # Max rows for aggregated queries
+
+logger.info(f"[ExecutorAgent Config] SQL_LIMIT_CLAUSE={SQL_LIMIT_CLAUSE}, MAX_ROWS_RETURNED={MAX_ROWS_RETURNED}, MAX_ROWS_AGGREGATED={MAX_ROWS_AGGREGATED}")
 
 
 def safe_dump(obj):
@@ -65,16 +77,20 @@ class ExecutorAgent(BaseAgent):
 
         return self._bq_client
 
-    def _add_limit_if_missing(self, sql: str, limit: int = 50000) -> str:
+    def _add_limit_if_missing(self, sql: str, limit: int = None) -> str:
         """
         Add a LIMIT clause to SQL if one doesn't already exist.
         This prevents BigQuery buffer allocation errors on large result sets.
+        Uses SQL_LIMIT_CLAUSE by default, or the specified limit.
         """
         sql_upper = sql.upper().strip()
         
         # Check if LIMIT already exists
         if "LIMIT" in sql_upper:
             return sql
+        
+        if limit is None:
+            limit = SQL_LIMIT_CLAUSE
         
         # Add LIMIT clause
         return f"{sql.rstrip(';')} LIMIT {limit}"
@@ -111,10 +127,13 @@ class ExecutorAgent(BaseAgent):
             try:
                 # Expecting dict like:
                 # {"group_by": ["partner"], "metric_alias": "clicks", "top_n": 10, ...}
+                logger.info(f"[Executor] Applying aggregation spec: {agg_spec_dict}")
+                logger.info(f"[Executor] Base SQL before aggregation:\n{sql}")
                 spec = AggregationSpec(**agg_spec_dict)
                 sql = build_aggregated_sql(sql, spec)
-                logger.debug(f"[Executor] Aggregated SQL:\n{sql}")
+                logger.info(f"[Executor] Aggregated SQL:\n{sql}")
             except Exception as e:
+                logger.exception(f"[Executor] Aggregation failed with exception: {e}")
                 output = AgentCOutput(
                     user_question=user_question,
                     incoming=IncomingResult(
@@ -127,8 +146,13 @@ class ExecutorAgent(BaseAgent):
                 return {"state": output, "should_run_explainer": True}
 
         # Add LIMIT to prevent buffer overflow at BigQuery level
-        sql_with_limit = self._add_limit_if_missing(sql, limit=50000)
+        sql_with_limit = self._add_limit_if_missing(sql)
         logger.info(f"[Executor] Running SQL:\n{sql_with_limit}")
+
+        # Determine appropriate row limit based on whether aggregation was applied
+        is_aggregated = agg_spec_dict is not None
+        max_rows = MAX_ROWS_AGGREGATED if is_aggregated else MAX_ROWS_RETURNED
+        logger.info(f"[Executor] Using max_rows={max_rows} (aggregated={is_aggregated})")
 
         # ---------------------------------------------
         # BigQuery Execution
@@ -138,8 +162,7 @@ class ExecutorAgent(BaseAgent):
             query_job = client.query(sql_with_limit, location="EU")
             logger.debug("[Executor] BigQuery job submitted... waiting for result.")
             # Set a reasonable row limit to prevent memory overflow
-            MAX_ROWS = 10000
-            rows_iter = query_job.result(timeout=600, max_results=MAX_ROWS)
+            rows_iter = query_job.result(timeout=600, max_results=max_rows)
             
             # Load rows in batches to avoid memory issues
             rows: List[dict] = []
@@ -151,9 +174,9 @@ class ExecutorAgent(BaseAgent):
                     coerced = {k: self._coerce_scalar(v) for k, v in dict(row.items()).items()}
                     rows.append(coerced)
                     row_count += 1
-                    if row_count >= MAX_ROWS:
+                    if row_count >= max_rows:
                         truncated = True
-                        logger.warning(f"[Executor] Result truncated at {MAX_ROWS} rows")
+                        logger.warning(f"[Executor] Result truncated at {max_rows} rows")
                         break
             except Exception as iter_error:
                 logger.error(f"[Executor] Error during row iteration: {iter_error}")
@@ -165,14 +188,14 @@ class ExecutorAgent(BaseAgent):
                     raise
 
             logger.debug(f"[Executor] BigQuery returned {len(rows)} rows")
-            if rows:
-                logger.debug(f"[Executor] First row sample: {rows[0]}")
+            # if rows:
+            #     logger.debug(f"[Executor] First row sample: {rows[0]}")
 
             # No rows ⇒ still success, just empty result
             if len(rows) == 0:
                 desc = "Query returned no rows."
             elif truncated:
-                desc = f"Returned {len(rows)} rows (result limited to first {MAX_ROWS} rows due to size)."
+                desc = f"Returned {len(rows)} rows (result limited to first {max_rows} rows due to size)."
             else:
                 desc = f"Returned {len(rows)} rows."
 
