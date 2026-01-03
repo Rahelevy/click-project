@@ -9,17 +9,10 @@ from google import genai
 from dotenv import load_dotenv
 
 from .schemas import AgentAOutput
+from main_agent.config import QUERY_LIMIT_DEFAULT, QUERY_LIMIT_RAW_DATA
 
 logger = logging.getLogger("intent")
 logger.debug("🔥 IntentAgent loaded")
-
-# ============================================
-# QUERY LIMIT CONFIGURATION
-# ============================================
-# Controls LIMIT clause added to queries without explicit aggregation
-# Adjust these values based on your data volume and performance needs
-QUERY_LIMIT_DEFAULT = int(os.getenv("QUERY_LIMIT_DEFAULT", "100000"))  # Default limit for non-aggregated queries
-QUERY_LIMIT_RAW_DATA = int(os.getenv("QUERY_LIMIT_RAW_DATA", "50000"))  # Limit for raw detail queries
 
 logger.info(f"[IntentAgent Config] QUERY_LIMIT_DEFAULT={QUERY_LIMIT_DEFAULT}, QUERY_LIMIT_RAW_DATA={QUERY_LIMIT_RAW_DATA}")
 
