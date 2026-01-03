@@ -6,21 +6,12 @@ from typing import Any, Dict, List
 from datetime import datetime, date, time
 from google.adk.agents import BaseAgent
 from google.cloud import bigquery
-import os
 
 from .schemas import AgentCOutput, IncomingResult
+from main_agent.config import SQL_LIMIT_CLAUSE, MAX_ROWS_RETURNED, MAX_ROWS_AGGREGATED
 
 # NEW: aggregation imports
 from .aggregations import build_aggregated_sql, AggregationSpec
-
-# ============================================
-# RESULT SIZE CONFIGURATION
-# ============================================
-# Controls maximum rows returned and LIMIT clause in BigQuery
-# Adjust these based on your UI/memory constraints
-SQL_LIMIT_CLAUSE = int(os.getenv("SQL_LIMIT_CLAUSE", "500000"))  # LIMIT clause in SQL to prevent BigQuery buffer issues
-MAX_ROWS_RETURNED = int(os.getenv("MAX_ROWS_RETURNED", "100000"))  # Maximum rows returned to frontend
-MAX_ROWS_AGGREGATED = int(os.getenv("MAX_ROWS_AGGREGATED", "50000"))  # Max rows for aggregated queries
 
 logger.info(f"[ExecutorAgent Config] SQL_LIMIT_CLAUSE={SQL_LIMIT_CLAUSE}, MAX_ROWS_RETURNED={MAX_ROWS_RETURNED}, MAX_ROWS_AGGREGATED={MAX_ROWS_AGGREGATED}")
 
