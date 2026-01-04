@@ -6,7 +6,7 @@ state = {
     "user_question": "show me sample rows",
     "sql": """
         SELECT *
-        FROM `practicode-2025.clicks_data_prac.encoded_clicks`
+        FROM `practicode-2025.clicks_data_prac.encoded_clicks_partitioned`
         WHERE app_id = 'app_id_20'
         LIMIT 10
     """

@@ -96,7 +96,7 @@ def convert_question_to_sql(question: str) -> str:
     # Final SQL
     sql = f"""
         SELECT {select_clause}
-        FROM `practicode-2025.clicks_data_prac.encoded_clicks`
+        FROM `practicode-2025.clicks_data_prac.encoded_clicks_partitioned`
         WHERE {where_sql}
         LIMIT 500;
     """

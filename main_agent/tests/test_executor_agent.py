@@ -10,7 +10,7 @@ print("\n--- EXECUTOR AGENT TEST START ---")
 # -------------------------------------------------------
 state_success = {
     "user_question": "test",
-    "sql": "SELECT * FROM practicode-2025.clicks_data_prac.encoded_clicks WHERE app_id= 'app_id_20' limit 10 "
+    "sql": "SELECT * FROM practicode-2025.clicks_data_prac.encoded_clicks_partitioned WHERE app_id= 'app_id_20' limit 10 "
 }
 
 result_success = agent.run(state_success)

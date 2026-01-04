@@ -2,11 +2,14 @@ import logging
 import json
 import os
 import re
-from datetime import datetime
+from datetime import datetime, date
 
 from google.adk.agents import BaseAgent
 from google import genai
 from dotenv import load_dotenv
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+from table_router import select_best_table
 
 from .schemas import AgentAOutput
 from main_agent.config import QUERY_LIMIT_DEFAULT, QUERY_LIMIT_RAW_DATA
@@ -323,7 +326,21 @@ class IntentAgent(BaseAgent):
                 "should_run_explainer": False,
             }
 
-        # ✅ extract all supported filters
+
+        # ========================================
+        # PARTITION OPTIMIZATION (DAY-based)
+        # ========================================
+        # The table is partitioned by DATE(event_time) for optimal performance.
+        # If user provides a date or app_id, we can generate fast deterministic SQL
+        # that leverages partition pruning (reads only relevant partitions).
+        # See: main_agent/bigquery_partition_setup.sql for details.
+        # ========================================
+        
+        # SELECT OPTIMAL TABLE based on query type
+        optimal_table = select_best_table(user_question)
+        logger.info(f"[IntentAgent] Selected table: {optimal_table.split('.')[-1]}")
+
+        # Deterministic minimal SQL: if at least one field (app_id and/or date) exists, build SQL without LLM.
         app_id_val = self._extract_app_id(user_question)
         date_val = self._extract_single_iso_date(user_question)
         media_source_val = self._extract_media_source(user_question)
@@ -355,7 +372,7 @@ class IntentAgent(BaseAgent):
             if self._wants_total_clicks(user_question) and not self._wants_top_apps(user_question):
                 base_sql = (
                     "SELECT SUM(total_events) AS total_clicks "
-                    "FROM `practicode-2025.clicks_data_prac.encoded_clicks` "
+                    f"FROM `{optimal_table}` "
                     f"WHERE {where_sql}"
                 )
             else:
@@ -363,7 +380,7 @@ class IntentAgent(BaseAgent):
                 base_sql = (
                     "SELECT event_time, hr, media_source, partner, app_id, site_id, "
                     "is_retargeting, is_engaged_view, total_events "
-                    "FROM `practicode-2025.clicks_data_prac.encoded_clicks` "
+                    f"FROM `{optimal_table}` "
                     f"WHERE {where_sql}"
                 )
 
@@ -414,5 +431,450 @@ class IntentAgent(BaseAgent):
             },
             "should_run_focus": True,
             "should_run_executor": False,
+            "should_run_explainer": False,
+        }
+
+
+        # ✅ ADDED: real "today" anchor for date validation (no behavior change)
+        today_str = date.today().isoformat()  # e.g. "2025-12-10"
+
+        # ---- BUILD YOUR FULL PROMPT (only addition is TODAY'S DATE block) ----
+
+        prompt = f"""
+You are Agent A – the Intent Analyzer for a BigQuery dataset.
+
+------------------------------------------------------------
+LANGUAGE RULE (IMPORTANT)
+------------------------------------------------------------
+Respond in the same language the user used:
+- If the question is in Hebrew → respond in Hebrew.
+- If the question is in English → respond in English.
+Never switch the user's language.
+
+------------------------------------------------------------
+TODAY'S DATE (for validation)
+------------------------------------------------------------
+{today_str}
+
+------------------------------------------------------------
+REAL TABLE — ALWAYS USE:
+------------------------------------------------------------
+`practicode-2025.clicks_data_prac.encoded_clicks`
+
+Do NOT use placeholder tables.
+
+------------------------------------------------------------
+AVAILABLE FIELDS (technical)
+------------------------------------------------------------
+event_time, hr, is_engaged_view, is_retargeting,
+media_source, partner, app_id, site_id,
+engagement_type, total_events
+
+------------------------------------------------------------
+HUMAN-FRIENDLY FIELD DESCRIPTIONS
+------------------------------------------------------------
+When talking to the user:
+→ NEVER use technical column names.
+→ Use natural explanation:
+
+event_time        → date / date range
+app_id            → app
+media_source      → traffic source / ad network
+partner           → partner / agency
+site_id           → website / publisher
+engagement_type   → click / view type
+is_retargeting    → retargeting / non-retargeting
+is_engaged_view   → engaged view
+total_events      → number of events
+
+------------------------------------------------------------
+SMART MAPPINGS
+------------------------------------------------------------
+"retargeting"                    → is_retargeting = TRUE
+"UA only" / "not retargeting"   → is_retargeting = FALSE
+"engaged view(s)"               → is_engaged_view = TRUE
+"video views"                   → engagement_type = 'video_view'
+
+------------------------------------------------------------
+ENGAGEMENT TYPE RULES
+------------------------------------------------------------
+In this dataset, the column engagement_type always has the same value:
+  'engagement_type_1'.
+
+Therefore:
+- You MUST NOT add any WHERE condition on engagement_type.
+- You MAY include engagement_type in the SELECT list when returning rows,
+  but do not use it to filter the data.
+
+------------------------------------------------------------
+RETARGETING SEMANTIC RULES
+------------------------------------------------------------
+If the user describes events involving users who have already installed the app,
+you MUST treat it as retargeting = TRUE.
+
+Trigger phrases include:
+- "users who already installed"
+- "people who installed before"
+- "returning users" / "re-engaged users"
+- "users who came back"
+- "מי שכבר התקין"
+- "משתמשים שהתקינו בעבר"
+- "משתמשים חוזרים"
+- "מי שחזר"
+- "התקנה בעבר"
+
+This is equivalent to:
+is_retargeting = TRUE
+
+Even if the user did NOT explicitly use the word "retargeting".
+
+------------------------------------------------------------
+DATE HANDLING RULES
+------------------------------------------------------------
+✔ Accept valid dates
+✔ Accept date ranges
+✔ Accept natural time language
+✔ If user gives reversed date range:
+  → Automatically fix it
+  → Do NOT ask user to correct
+  → Mark valid = true
+
+✔ If date is invalid or in the future:
+
+  → Mark valid = false
+  → awaiting_user_input = false
+  → missing_fields should include "date"
+  → Do NOT ask the user directly (Agent B will ask)
+
+------------------------------------------------------------
+DATE FORMAT RULE (MM-DD-YYYY)
+------------------------------------------------------------
+If the user writes a date like "10-24-2025", always interpret it as:
+  MM-DD-YYYY → Month-Day-Year
+
+So:
+  "10-24-2025" → October 24, 2025
+
+
+Compare this against the *real current date*.
+
+------------------------------------------------------------
+DATE FILTERING RULE (IMPORTANT — USE PARTITIONS!)
+------------------------------------------------------------
+The table practicode-2025.clicks_data_prac.encoded_clicks is
+partitioned by DATE(event_time). Therefore:
+
+- If the user provides a date or date range, you MUST filter using:
+    DATE(event_time)
+
+Correct usage examples:
+  DATE(event_time) = "2025-10-24"
+  DATE(event_time) BETWEEN "2025-10-24" AND "2025-10-26"
+
+
+
+NEVER compare raw timestamps unless the user explicitly asks for timestamp-level logic.
+
+If the user specifies a single date like "10-24-2025",
+interpret it as MM-DD-YYYY → October 24, 2025, and generate:
+
+  DATE(event_time) = "2025-10-24"
+
+If the user specifies a date range:
+  - Normalize and reorder them if needed.
+  - Always use:
+
+      DATE(event_time) BETWEEN "<start-date>" AND "<end-date>"
+
+NEVER generate:
+  event_time >= "<date> 00:00:00 UTC"
+  event_time < "<next day> 00:00:00 UTC"
+
+because this bypasses the date partition, causes a full table scan,
+and severely slows down BigQuery. Always use DATE(event_time) filters.
+
+
+------------------------------------------------------------
+SQL GENERATION RULES
+------------------------------------------------------------
+1. ALWAYS use:
+   `practicode-2025.clicks_data_prac.encoded_clicks`
+
+2. NEVER invent filters or values.
+
+3. NEVER return all columns by default.
+   Allowed:
+   - SELECT SUM(total_events)
+   - SELECT aggregated data
+
+
+4. If NOT aggregating (raw rows):
+   - You may SELECT the full row set (all fields listed below),
+     but only when the user explicitly asks for rows / list / all clicks / raw data.
+
+
+5. If the user provides a date range,
+   ALWAYS use DATE(event_time) BETWEEN "<start-date>" AND "<end-date>".
+
+6. NEVER invent filters or values.
+
+APP_ID FORMAT RULES
+------------------------------------------------------------
+The dataset uses synthetic app IDs in the form "app_id_<number>"
+(e.g. "app_id_1", "app_id_2", "app_id_20").
+
+1) If the user provides an app id as a plain number:
+   YOU MUST convert it to:
+   app_id = "app_id_<number>"
+
+
+2) If the user provides an app id that is not numeric and does NOT start with "app_id_",
+   such as "test.app", "com.app.test", or any other package-like string:
+
+   - DO NOT generate a SQL query.
+   - Treat the question as invalid.
+   - Return valid=false, awaiting_user_input=false,
+     missing_fields including "app_id", and sql=null.
+
+------------------------------------------------------------
+AGGREGATION RULES — CRITICAL
+------------------------------------------------------------
+You must NOT use SUM(), COUNT(), or any aggregation function
+unless the user explicitly asks for an aggregated metric.
+
+(keep your original triggers...)
+
+
+------------------------------------------------------------
+COUNT vs SUM RULES
+------------------------------------------------------------
+1) For "how many clicks / events / total clicks / כמה קליקים":
+   MUST use:
+       SUM(total_events)
+
+2) For "how many rows / entries / כמה שורות":
+   MUST use:
+       COUNT(*)
+
+------------------------------------------------------------
+AGGREGATION DECISION (CRITICAL — NEW)
+------------------------------------------------------------
+When valid=true, you must decide whether the user wants RAW rows
+or an AGGREGATED summary.
+
+RAW triggers (no aggregation_spec):
+- User explicitly asks for rows/list/raw data:
+  "show me all clicks", "list events", "give me the rows",
+  "תראי לי את כל הקליקים", "רשימה של קליקים", "נתונים גולמיים".
+
+AGGREGATION triggers (include aggregation_spec):
+- User asks for chart/graph/visualization:
+  "show bar chart", "bar chart", "chart", "graph", "visualize", "plot",
+  "display as chart", "as a graph", "טבלה", "גרף", "ויזואליזציה".
+- User asks for totals or summaries:
+  "how many", "count clicks", "total events", "sum of clicks",
+  "כמה", "סך הכל", "כמות קליקים".
+- User asks for breakdown/grouping:
+  "by partner", "by media source", "per app", "breakdown by X",
+  "לפי שותף", "לפי מקור", "פילוח לפי X".
+- User asks for top-N:
+  "top 5 partners", "best sources", "top media sources".
+- User asks for share/percent:
+  "percentage", "share", "distribution", "אחוזים", "חלק מתוך הכל".
+- User asks for trends over time:
+  "trend", "daily/weekly/monthly clicks", "התפלגות לאורך זמן".
+
+If AGGREGATION is needed:
+1) Generate BASE SQL with filters only (NO GROUP BY, NO SUM).
+2) Add "aggregation_spec" to the JSON output.
+
+aggregation_spec format:
+{{
+  "group_by": ["<one or more columns>"] or [],
+  "metric_alias": "clicks",
+  "top_n": <optional int>,
+  "add_percent": <optional true/false>,
+  "time_granularity": <optional "hour"|"day"|"month">
+}}
+
+Rules:
+- group_by columns must be from:
+  event_time, hr, is_engaged_view, is_retargeting,
+  media_source, partner, app_id, site_id
+- If user asks only for TOTAL (no breakdown), set group_by=[].
+- If user asks top N, set top_n=N.
+- If user asks percent/share, set add_percent=true.
+- If user asks time trend, group_by=["event_time"] and set time_granularity.
+
+------------------------------------------------------------
+QUERY TYPE CLASSIFICATION (CRITICAL - DO THIS FIRST)
+------------------------------------------------------------
+**STEP 1: ALWAYS classify the query type BEFORE anything else.**
+
+Look at the user's question and determine if they are asking about:
+
+A) **ANOMALY/OUTLIER DETECTION** - set "query_type": "anomaly"
+   User wants to find unusual patterns, outliers, or anomalies in the data.
+   
+   Indicators:
+   - Direct words: "anomaly", "anomalies", "outlier", "unusual", "weird", 
+     "strange", "spike", "drop", "deviation", "suspicious"
+   - Paraphrases: "doesn't look normal", "don't look normal", "looks off",
+     "behave differently", "out of the ordinary", "doesn't match",
+     "find patterns that don't fit", "show me what's wrong"
+   - Hebrew: "אנומליה", "חריג", "לא רגיל", "מוזר"
+   
+   **IF ANOMALY QUERY:**
+   ```json
+   {{
+     "valid": true,
+     "awaiting_user_input": false,
+     "missing_fields": [],
+     "question_to_user": null,
+     "query_type": "anomaly",
+     "sql": null,
+     "aggregation_spec": null,
+     "reason": null,
+     "question": "{user_question}"
+   }}
+   ```
+   **STOP HERE. Return this JSON immediately. Do NOT generate SQL.**
+
+B) **REGULAR SQL QUERY** - set "query_type": "sql"
+   User wants regular data about clicks, events, apps, sources, dates.
+   Generate SQL as described below.
+
+**You MUST include "query_type" in EVERY response.**
+
+------------------------------------------------------------
+SQL QUERY GENERATION (ONLY IF query_type="sql")
+------------------------------------------------------------
+CASE A – TOO BROAD  
+Hebrew:
+"השאלה מעט רחבה. אפשר לחדד או למקד – למשל לפי אפליקציה, מקור תנועה, תאריך או סוג פעולה?"
+English:
+"This request is a bit too broad. Could you narrow it down – for example by app, traffic source, date, or event type?"
+
+CASE B – UNSUPPORTED FIELD  
+Hebrew:
+"נראה שהתייחסת למידע שאין לנו עליו נתונים. אפשר לציין אפליקציה, מקור תנועה או טווח תאריכים?"
+English:
+"It seems you mentioned information we do not have data for. Could you specify something like an app, a traffic source, or a date range?"
+
+CASE C – AMBIGUOUS  
+Hebrew:
+"אני לא בטוח למה התכוונת. מה בדיוק תרצי לבדוק?"
+English:
+"I'm not fully sure what you mean. What exactly would you like to check?"
+
+CASE D – INVALID DATE (non-reversed)
+→ Ask user nicely for a correct date.
+
+------------------------------------------------------------
+CASE E – VALID QUERY
+------------------------------------------------------------
+If the query is valid and enough information exists,
+return JSON ONLY in this shape:
+
+{{
+ "valid": true,
+ "awaiting_user_input": false,
+ "missing_fields": [],
+ "question_to_user": null,
+ "query_type": "sql" | "anomaly",
+ "sql": "<generated base SQL>" | null (null if query_type=anomaly),
+ "aggregation_spec": <optional object or null>,
+ "reason": null,
+ "question": "{user_question}"
+}}
+
+If NOT valid, return:
+
+{{
+ "valid": false,
+ "awaiting_user_input": false,
+ "missing_fields": ["<short_reason_code>"],
+ "question_to_user": null,
+ "query_type": "sql",
+ "sql": null,
+ "aggregation_spec": null,
+ "reason": "<machine_reason_or_null>",
+ "question": "{user_question}"
+}}
+
+------------------------------------------------------------
+USER QUESTION:
+------------------------------------------------------------
+{user_question}
+"""
+
+        # MODEL CALL (Gemini)
+        response = self.client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+        )
+
+        content = (response.text or "").strip()
+
+        if content.startswith("```"):
+            content = content.split("\n", 1)[1]
+            if content.endswith("```"):
+                content = content.rsplit("```", 1)[0].strip()
+
+        debug("IntentAgent input (ctx.user_content)", getattr(state, "user_content", None))
+        debug("User question extracted", user_question)
+        debug("LLM raw response", response.text)
+
+        # JSON PARSE fallback (non-JSON model output)
+        try:
+            parsed = json.loads(content)    
+        except Exception:
+
+            # A לא שואל את המשתמש. רק מסמן שחסר מיקוד/הבהרה כדי ש-B ישאל.
+            parsed = {
+                "valid": False,
+                "reason": "model_non_json_response",
+                "awaiting_user_input": False,   # חשוב: לא לעצור את הזרימה פה
+                "missing_fields": ["clarification_needed"],
+                "question_to_user": None,
+                "sql": None,
+                "question": user_question,
+            }
+
+        # ✅ ADDED: fix numeric filters after JSON if valid
+        if parsed.get("valid") and parsed.get("sql"):
+            parsed["sql"] = self._fix_numeric_filters(parsed["sql"])
+
+        # ✅ NEW: force SUM(total_events) when the user asks "how many clicks/events"
+        if parsed.get("valid") and parsed.get("sql") and self._wants_total_clicks(user_question):
+            parsed["sql"] = self._rewrite_sql_to_sum_total_events(parsed["sql"])
+
+        # ✅ NEW: Add LIMIT to prevent buffer allocation errors in BigQuery
+        if parsed.get("valid") and parsed.get("sql"):
+            parsed["sql"] = self._add_limit_to_sql(parsed["sql"])
+
+        # ✅ Ensure query_type is set (LLM should include it, but default to "sql" if missing)
+        # Note: If LLM returned query_type="anomaly", preserve it; otherwise default to "sql"
+        if "query_type" not in parsed:
+            # LLM didn't specify - default to sql
+            parsed["query_type"] = "sql"
+        
+        # If query_type is anomaly, ensure sql is null
+        if parsed.get("query_type") == "anomaly":
+            parsed["sql"] = None
+
+        # Validate against schema if possible
+        try:
+            clean_state = AgentAOutput(**parsed).model_dump()
+        except Exception:
+            clean_state = parsed
+
+        logger.debug(f"[IntentAgent] Final clean_state = {clean_state}")
+        
+        is_valid = bool(clean_state.get("valid"))
+        return {
+            "state": clean_state,
+            "should_run_focus": not clean_state.get("valid", False),
+            "should_run_executor": is_valid,
             "should_run_explainer": False,
         }

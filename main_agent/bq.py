@@ -62,7 +62,7 @@ if __name__ == "__main__":
     print(bq_client.bq_client)
 
     qu = """
-    select * from `practicode-2025.clicks_data_prac.encoded_clicks`
+    select * from `practicode-2025.clicks_data_prac.encoded_clicks_partitioned`
     where app_id='app_id_5'
     and date(event_time)= '2025-10-24'
     limit 10

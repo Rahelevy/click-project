@@ -196,7 +196,8 @@ class RootAgent(BaseAgent):
             if focus_state.get("awaiting_user_input"):
                 debug_trace.append("Stopped: Waiting for User Input (Focus Agent)")
                 q = focus_state.get("question_to_user") or \
-                    ("אפשר לחדד את הבקשה?" if any("א" <= ch <= "ת" for ch in (final_intent.get("question") or "")) else
+                    ("אפשר לחדד את הבקשה?" if any("א" <= ch <= "ת" for ch in (final_intent.get("question") or "")) 
+                     else
                      "Can you clarify your question?")
 
                 state_with_trace = dict(focus_state)
