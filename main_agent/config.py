@@ -23,15 +23,15 @@ QUERY_LIMIT_RAW_DATA = 50000
 # LIMIT clause added to SQL queries sent to BigQuery
 # Prevents BigQuery buffer allocation errors on very large result sets
 # Set higher if you have more memory/network bandwidth, lower for resource constraints
-SQL_LIMIT_CLAUSE = 500000
+SQL_LIMIT_CLAUSE = 100000
 
 # Maximum rows returned for non-aggregated queries
 # This is the hard cap sent to the frontend (memory/UI performance limit)
-MAX_ROWS_RETURNED = 100000
+MAX_ROWS_RETURNED = 20000
 
 # Maximum rows returned for aggregated queries (top-N, group by, etc)
 # Aggregated data is typically smaller, so we can return more rows
-MAX_ROWS_AGGREGATED = 50000
+MAX_ROWS_AGGREGATED = 10000
 
 
 # ============================================
