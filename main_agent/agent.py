@@ -278,6 +278,7 @@ class RootAgent(BaseAgent):
         executor_input = {
             "user_question": final_intent.get("question"),
             "sql": final_intent.get("sql"),
+            "aggregation_spec": final_intent.get("aggregation_spec"),
         }
         logger.debug(f"[Root] Executor input = {executor_input}")
         debug_trace.append("Executor: Running SQL query")
@@ -332,7 +333,7 @@ class RootAgent(BaseAgent):
         try:
             incoming = exec_state.get("incoming", {})
             explain_input = ExplanationInput(
-                user_question=exec_state.get("user_question") or executor_input.get("user_question"),
+                user_question=combined_q,  # Use current question for chart detection
                 incoming=ExecutorResult(
                     status=incoming.get("status") if isinstance(incoming, dict) else incoming.status,
                     description=incoming.get("description") if isinstance(incoming, dict) else incoming.description,
@@ -343,7 +344,7 @@ class RootAgent(BaseAgent):
         except Exception as e:
             logger.exception(f"[Root] Failed to build ExplanationInput: {e}")
             explain_input = {
-                "user_question": exec_state.get("user_question") or executor_input.get("user_question"),
+                "user_question": combined_q,  # Use current question for chart detection
                 "incoming": exec_state.get("incoming"),
                 "db_result": exec_state.get("db_result"),
                 "sql": final_intent.get("sql"),

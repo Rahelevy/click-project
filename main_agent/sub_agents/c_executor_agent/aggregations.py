@@ -264,15 +264,23 @@ def ensure_at_least_one_filter_present(sql: str) -> None:
     Enforces the A/B contract:
     Do not aggregate (or execute) SQL unless it contains at least one WHERE filter
     on one of the FILTERABLE_COLUMNS. Time filters are NOT mandatory.
+    Handles function-wrapped columns like DATE(event_time).
     """
     if "where" not in sql.lower():
         raise ValueError("SQL must include at least one filter (WHERE clause).")
 
     col_pattern = r"|".join([re.escape(c) for c in FILTERABLE_COLUMNS])
 
+    # Pattern 1: Direct column usage (e.g., app_id = "...")
+    # Pattern 2: Function-wrapped columns (e.g., DATE(event_time) = "...")
     has_filter = bool(
         re.search(
             rf"\b({col_pattern})\b\s*(=|!=|<>|>=|>|<=|<|between\b|in\b|like\b|is\b)",
+            sql,
+            re.IGNORECASE
+        )
+        or re.search(
+            rf"\b\w+\s*\(\s*({col_pattern})\s*\)\s*(=|!=|<>|>=|>|<=|<|between\b|in\b|like\b|is\b)",
             sql,
             re.IGNORECASE
         )

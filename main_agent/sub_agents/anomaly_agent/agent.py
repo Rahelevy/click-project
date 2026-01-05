@@ -156,41 +156,151 @@ class AnomalyAgent:
         return out.model_dump()
 
     def _chart_top_anomalies(self, rows) -> Dict[str, Any]:
-        """Bar chart: top anomalies ranked by ratio across all sources."""
+        """Time-series line charts showing actual clicks over time for top anomalies."""
         data = self._bq_rows_to_dicts(rows)
-        # take top 20 by ratio
+        # take top anomalies by ratio
         try:
             data.sort(key=lambda d: float(d.get("ratio", 0) or 0), reverse=True)
         except Exception:
             pass
-        data = data[:20]
-
-        chart_rows = []
-        for d in data:
+        
+        # Get top 5 anomalies and create time-series charts for each
+        top_anomalies = data[:5]
+        
+        if not top_anomalies:
+            return ExplanationOutput(
+                status="success",
+                description="No anomalies detected.",
+                render_type="text",
+            ).model_dump()
+        
+        # For the strongest anomaly, create a detailed time-series chart
+        strongest = top_anomalies[0]
+        media_source = strongest.get("media_source")
+        anomaly_day = str(strongest.get("day_date"))
+        anomaly_hour = int(strongest.get("hour_of_day", 0))
+        absolute_gap = strongest.get("absolute_gap", 0)
+        
+        # Fetch time series around the anomaly (past and future) for comparison
+        # This allows users to see the normal baseline hours before the spike
+        sql = f"""
+        SELECT
+          day_date,
+          hour_of_day,
+          total_clicks
+        FROM `{PROJECT}.{DATASET}.media_source_hourly_agg`
+        WHERE media_source = '{media_source}'
+        ORDER BY day_date, hour_of_day
+        """
+        
+        try:
+            time_series_rows = list(client.query(sql).result())
+            ts_data = self._bq_rows_to_dicts(time_series_rows)
+            
+            # Filter to show a window around the anomaly (a few hours before and after)
+            # Calculate the anomaly timestamp for comparison
+            from datetime import datetime, timedelta
             try:
-                label = f"{d.get('media_source')} {d.get('day_date')} {int(d.get('hour_of_day', 0)):02d}:00"
-            except Exception:
-                label = f"{d.get('media_source')} {d.get('day_date')} {d.get('hour_of_day')}"
-            try:
-                ratio_val = float(d.get("ratio", 0) or 0)
-            except Exception:
-                ratio_val = 0.0
-            chart_rows.append({"anomaly": label, "ratio": ratio_val})
+                anomaly_dt = datetime.strptime(anomaly_day, "%Y-%m-%d")
+                anomaly_timestamp = anomaly_dt.replace(hour=anomaly_hour)
+                
+                # Show data from 4 hours before to 4 hours after the anomaly
+                start_time = anomaly_timestamp - timedelta(hours=4)
+                end_time = anomaly_timestamp + timedelta(hours=4)
+                
+                # Filter data to this window
+                filtered_data = []
+                for d in ts_data:
+                    day_str = str(d.get("day_date"))
+                    hour = int(d.get("hour_of_day", 0))
+                    try:
+                        dt = datetime.strptime(day_str, "%Y-%m-%d").replace(hour=hour)
+                        if start_time <= dt <= end_time:
+                            filtered_data.append(d)
+                    except:
+                        pass
+                
+                ts_data = filtered_data if filtered_data else ts_data
+            except:
+                pass  # If filtering fails, use all data
+            
+            # Create chart data with proper timestamps
+            chart_rows = []
+            for d in ts_data:
+                day_str = str(d.get("day_date"))
+                hour = int(d.get("hour_of_day", 0))
+                clicks = d.get("total_clicks", 0)
+                # Create cleaner timestamp string (just date and hour)
+                # Format: "10-24 15:00" instead of "2025-10-24 15:00"
+                try:
+                    # Extract month-day only
+                    date_parts = day_str.split("-")
+                    if len(date_parts) == 3:
+                        timestamp = f"{date_parts[1]}-{date_parts[2]} {hour:02d}:00"
+                    else:
+                        timestamp = f"{day_str} {hour:02d}:00"
+                except:
+                    timestamp = f"{day_str} {hour:02d}:00"
+                
+                chart_rows.append({
+                    "time": timestamp,
+                    "clicks": float(clicks) if clicks is not None else 0.0
+                })
+            
+            options = {
+                "title": {"text": f"Media Source: {media_source} (Anomaly on {anomaly_day} at hour {anomaly_hour}, Gap: {absolute_gap})"},
+                "tooltip": {"trigger": "axis"},
+                "grid": {"left": "10%", "right": "10%", "bottom": "15%", "containLabel": True},
+                "xAxis": {
+                    "type": "category",
+                    "data": [row["time"] for row in chart_rows]
+                },
+                "yAxis": {"type": "value"},
+                "series": [
+                    {
+                        "type": "line",
+                        "data": [row["clicks"] for row in chart_rows],
+                        "smooth": True,
+                        "name": "Clicks per Hour"
+                    }
+                ]
+            }
+            img = chart_options_to_png_base64(options)
+            
+            # Create a clear, user-friendly description
+            description = f"""
+📊 **Strongest Anomaly**
 
-        options = rows_to_echarts_options(
-            chart_rows,
-            chart_type="bar",
-            x_column="anomaly",
-            y_column="ratio",
-            title="Top anomalies by deviation ratio",
-        )
-        img = chart_options_to_png_base64(options)
-        out = ExplanationOutput(
-            status="success",
-            description="Top anomalies detected across sources (ranked by ratio).",
-            render_type="chart",
-            table_markdown=None,
-            chart_image=img,
-            chart_options=options,
-        )
-        return out.model_dump()
+🔴 Media Source: {media_source}
+📅 {anomaly_day} at {anomaly_hour:02d}:00
+📈 {absolute_gap:,.0f} extra clicks ({strongest.get('ratio', 0):.2f}x above normal)
+"""
+            
+            # Add summary of other top anomalies (compact version)
+            if len(top_anomalies) > 1:
+                description += "\n**Other anomalies:** "
+                other_list = []
+                for anom in top_anomalies[1:4]:
+                    media = anom.get('media_source')
+                    hour = anom.get('hour_of_day')
+                    ratio = anom.get('ratio', 0)
+                    other_list.append(f"{media} {hour}:00 ({ratio:.2f}x)")
+                description += " • ".join(other_list)
+            
+            out = ExplanationOutput(
+                status="success",
+                description=description.strip(),
+                render_type="chart",
+                table_markdown=None,
+                chart_image=img,
+                chart_options=options,
+            )
+            return out.model_dump()
+            
+        except Exception as e:
+            # Fallback to simple text if query fails
+            return ExplanationOutput(
+                status="success",
+                description=f"Top anomaly: {media_source} on {anomaly_day} at {anomaly_hour}:00 (Error loading chart: {e})",
+                render_type="text",
+            ).model_dump()
