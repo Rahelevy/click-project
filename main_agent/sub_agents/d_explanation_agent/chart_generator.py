@@ -44,17 +44,29 @@ def chart_options_to_png_base64(options: Dict[str, Any]) -> Optional[str]:
         if not x_data or not y_data:
             return None
         
-        # Create figure
-        fig, ax = plt.subplots(figsize=(12, 6))
+        # Create figure with better size for time-series
+        fig, ax = plt.subplots(figsize=(14, 6))
         
         if chart_type == "pie":
             # Pie chart
             ax.pie(y_data, labels=x_data, autopct='%1.1f%%', startangle=90)
         elif chart_type == "line":
             # Line chart
-            ax.plot(x_data, y_data, marker='o', linewidth=2, markersize=6)
-            ax.set_ylabel("Value")
-            ax.grid(True, alpha=0.3)
+            ax.plot(x_data, y_data, marker='o', linewidth=2, markersize=4, label='Clicks per Hour')
+            ax.set_ylabel("Clicks", fontsize=12, fontweight='bold')
+            ax.grid(True, alpha=0.3, linestyle='--')
+            ax.legend(loc='upper right', fontsize=10)
+            
+            # Better X-axis formatting for time-series
+            # Sample every Nth label to avoid overlap
+            n_labels = len(x_data)
+            if n_labels > 20:
+                step = max(1, n_labels // 15)  # Show ~15 labels max
+                ax.set_xticks(range(0, n_labels, step))
+                ax.set_xticklabels([x_data[i] for i in range(0, n_labels, step)], rotation=45, ha='right')
+            else:
+                ax.tick_params(axis='x', rotation=45)
+                plt.setp(ax.xaxis.get_majorticklabels(), ha='right')
         else:
             # Bar chart (default)
             ax.bar(x_data, y_data, color='#5470c6', edgecolor='black', alpha=0.8)
