@@ -9,6 +9,7 @@
                     │ - Manages conversation context  │
                     │ - Routes through pipeline       │
                     │ - Handles errors & caching      │
+                    │ - Multi-turn state management   │
                     └─────────────────┬───────────────┘
                                       │
                                       ▼
@@ -17,35 +18,46 @@
                     │ - Validates question            │
                     │ - Checks if complete           │
                     │ - Extracts: app_id, dates       │
-                    │ - Generates SQL                 │
+                    │ - Detects query_type (anomaly)  │
+                    │ - Generates SQL with routing    │
                     │ - Returns: valid=true/false     │
                     └─────────────────┬───────────────┘
                                       │
                           ┌───────────┴────────────┐
                           │                        │
          Is ANOMALY question?         Regular question
+         (query_type="anomaly")                    │
                           │                        │
                           ▼                        ▼
          ┌──────────────────────────────┐ ┌─────────────────────┐
-         │ Anomaly Agent (Agent Bonus)  │ │ Focus Agent (Ag 2)  │
-         │ - Detects anomalies          │ │ - Ask clarification │
-         │ - Hourly aggregation         │ │ - Refine question   │
-         │ - Media source analysis      │ │ - Update SQL        │
-         │ - Returns answer directly    │ │ - Loop if needed    │
-         └──────────────┬───────────────┘ └──────────┬──────────┘
-                        │                            │
+         │ ✅ Anomaly Agent (Integrated)│ │ Focus Agent (Ag 2)  │
+         │ - Hourly anomaly aggregation │ │ - Ask clarification │
+         │ - Media source analysis      │ │ - Refine question   │
+         │ - Z-score detection          │ │ - Update SQL        │
+         │ - Chart visualization        │ │ - Loop if needed    │
+         │ - Returns directly to user   │ └──────────┬──────────┘
+         └──────────────┬───────────────┘            │
                         │                            ▼
                         │              ┌─────────────────────────┐
+                        │              │ Table Router            │
+                        │              │ - Select optimal table  │
+                        │              │ - By app/media/partner  │
+                        │              └──────────┬──────────────┘
+                        │                         │
+                        │                         ▼
+                        │              ┌─────────────────────────┐
                         │              │ BigQuery Cache          │
+                        │              │ - Normalize SQL         │
                         │              │ - Check if cached       │
+                        │              │ - 30-day TTL            │
                         │              └──────────┬──────────────┘
                         │                         │
                         │                         ▼
                         │              ┌─────────────────────────┐
                         │              │ Executor Agent (Ag 3)   │
                         │              │ - Execute SQL           │
-                        │              │ - Aggregation           │
-                        │              │ - Cache results         │
+                        │              │ - Aggregation support   │
+                        │              │ - Cache write (MERGE)   │
                         │              └──────────┬──────────────┘
                         │                         │
                         │                         ▼
@@ -53,10 +65,21 @@
                         │              │ Explanation Agent (Ag 4)│
                         │              │ - Formats data          │
                         │              │ - Detects language      │
+                        │              │ - Auto chart detection  │
+                        │              │ - Matplotlib rendering  │
                         │              │ - Render: text/table/ch │
                         │              └──────────┬──────────────┘
                         │                         │
                         └────────────┬────────────┘
+                                     │
+                                     ▼
+                          ┌─────────────────────┐
+                          │ React UI (SSE)      │
+                          │ - TableRenderer     │
+                          │ - ChartRenderer     │
+                          │ - LocalStorage      │
+                          │ - RTL/LTR Support   │
+                          └─────────────────────┘
                                      │
                                      ▼
                           User (Final Response)
@@ -195,21 +218,57 @@
 
 ### 4️⃣ Cache Check
 - בדיקה האם התשובה קיימת במטמון
+- נורמליזציה של SQL query
 - אם כן → החזרת תשובה מהירה
 - אם לא → המשך לביצוע
 
 ### 5️⃣ ביצוע Query (Executor Agent)
-- הרצת SQL על BigQuery
+- הרצת SQL על BigQuery (EU location)
 - טיפול באגרגציות
-- שמירת תוצאות במטמון
+- שמירת תוצאות במטמון (MERGE statement)
 
 ### 6️⃣ עיצוב תשובה (Explanation Agent)
-- זיהוי שפה
+- זיהוי שפה (עברית/אנגלית)
+- זיהוי אוטומטי של בקשות לגרף
+- בחירה חכמה של עמודות ל-X/Y axis
+- ייצור גרפים עם matplotlib (PNG base64)
 - בחירת סוג תצוגה: text / table / chart
 - יצירת הסבר ידידותי למשתמש
 
 ### 7️⃣ החזרת תשובה
 - הצגת התוצאות למשתמש בפורמט המתאים
+- React UI מעבד: TableRenderer / ChartRenderer
+- שמירה ב-LocalStorage
+
+---
+
+## 🔑 Key Components (רכיבים מרכזיים)
+
+### Table Router
+- בחירה אוטומטית של הטבלה האופטימלית
+- 6 טבלאות מבוססות partition:
+  - `encoded_clicks_partitioned` (ברירת מחדל)
+  - `encoded_clicks_by_app` (אופטימיזציה לפי אפליקציה)
+  - `encoded_clicks_by_media` (אופטימיזציה לפי מקור)
+  - `encoded_clicks_by_partner` (אופטימיזציה לפי שותף)
+  - `encoded_clicks_by_site` (אופטימיזציה לפי אתר)
+  - `encoded_clicks_by_retargeting` (אופטימיזציה לפי ריטרגטינג)
+
+### Cache System
+- שימוש ב-BigQuery table: `practicode-2025.cache.query_results`
+- נורמליזציה של SQL (case, whitespace insensitive)
+- TTL: 30 days
+- Hash key: SHA256 של SQL מנורמל
+- MERGE operation for cache write
+
+### Chart Generation
+- Automatic detection via keywords
+- Smart column selection based on user question
+- Support for bar, line, pie charts
+- Time-series optimization (label rotation, sampling)
+- "Top N" detection and handling
+- Aggregation by dimension
+- Matplotlib backend (PNG base64)
 
 ---
 

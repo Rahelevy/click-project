@@ -70,8 +70,12 @@ def chart_options_to_png_base64(options: Dict[str, Any]) -> Optional[str]:
         else:
             # Bar chart (default)
             ax.bar(x_data, y_data, color='#5470c6', edgecolor='black', alpha=0.8)
-            ax.set_ylabel("Clicks")
+            ax.set_ylabel("Clicks", fontsize=12, fontweight='bold')
             ax.tick_params(axis='x', rotation=45)
+            
+            # Format Y-axis with comma separators for better readability
+            from matplotlib.ticker import FuncFormatter
+            ax.yaxis.set_major_formatter(FuncFormatter(lambda x, p: f'{int(x):,}'))
         
         ax.set_title(title, fontsize=14, fontweight='bold')
         ax.set_xlabel("Category")

@@ -418,23 +418,11 @@ class IntentAgent(BaseAgent):
                 "should_run_explainer": False,
             }
 
-        # fallback
-        return {
-            "state": {
-                "valid": False,
-                "awaiting_user_input": False,
-                "missing_fields": ["filter_needed"],
-                "question_to_user": None,
-                "sql": None,
-                "reason": "too_broad",
-                "question": user_question,
-            },
-            "should_run_focus": True,
-            "should_run_executor": False,
-            "should_run_explainer": False,
-        }
-
-
+        # ========================================
+        # FALLBACK: Use LLM when no filters detected
+        # ========================================
+        logger.info("[IntentAgent] No filters detected, using LLM for intent parsing")
+        
         # ✅ ADDED: real "today" anchor for date validation (no behavior change)
         today_str = date.today().isoformat()  # e.g. "2025-12-10"
 
@@ -821,9 +809,9 @@ USER QUESTION:
             if content.endswith("```"):
                 content = content.rsplit("```", 1)[0].strip()
 
-        debug("IntentAgent input (ctx.user_content)", getattr(state, "user_content", None))
-        debug("User question extracted", user_question)
-        debug("LLM raw response", response.text)
+        logger.debug(f"IntentAgent input (ctx.user_content): {getattr(state, 'user_content', None)}")
+        logger.debug(f"User question extracted: {user_question}")
+        logger.debug(f"LLM raw response: {response.text}")
 
         # JSON PARSE fallback (non-JSON model output)
         try:

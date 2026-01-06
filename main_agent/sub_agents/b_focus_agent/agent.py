@@ -85,11 +85,6 @@ class FocusAgent(BaseAgent):
         has_date = _has_any_date(original_question)
         has_app = _has_app_id(original_question)
 
-        # Language-aware messages
-        ask_date_he = "מה התאריך או טווח התאריכים הרצוי?"
-        ask_date_en = "What date or date range would you like?"
-        ask_app_he = "מהו מזהה האפליקציה (בפורמט app_id_<מספר>)?"
-        ask_app_en = "What is the app id (format app_id_<number>)?"
 
         # Additional detectors for other allowed fields
         def _has_media_source(txt: str) -> bool:
@@ -147,27 +142,7 @@ class FocusAgent(BaseAgent):
                 "should_run_explainer": False,
             }
 
-        # If at least one field is present, proceed without further clarification.
-        output_model = AgentBOutput(
-            awaiting_user_input=False,
-            question_to_user=None,
-            missing_fields=[],
-            refined_question=original_question,
-            failed=False,
-            error_message=None,
-        )
-        output_dict = (
-            output_model.model_dump()
-            if hasattr(output_model, "model_dump")
-            else output_model.dict()
-        )
-        return {
-            "state": output_dict,
-            "should_run_focus": False,
-            "should_run_executor": False,
-            "should_run_explainer": False,
-        }
-
+        # If at least one field is present, use LLM to determine if more clarification is needed
         # >>> ADDED: language rule for prompt
         lang_rule = (
             "Respond in Hebrew, because the user's question is in Hebrew."
